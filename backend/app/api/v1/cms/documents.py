@@ -1,31 +1,28 @@
-import os
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.db.session import get_db
 from app.api.deps import get_current_user
+from app.application.document.upload_document import handle_upload_document
 
 from app.models.document import Document
-from app.models.document_job import DocumentJob
+from app.models.document_metadata import DocumentMetadata
 from app.models.qa_history import QAHistory
 from app.models.document_summary import DocumentSummary
 
-from app.schemas.document import DocumentStatusUpdate
-from app.services.document_state import can_transition
-from app.services.event_publisher import publish_document_uploaded
-
-from app.services.file_extractor import (
-    extract_text_from_pdf,
-    extract_text_from_txt,
-    extract_text_from_docx,
+from app.schemas.document import (
+    DocumentListResponse,
+    DocumentMetadataResponse,
+    DocumentMetadataUpdate,
+    DocumentResponse,
+    DocumentStatusUpdate,
+    DocumentUploadResponse,
 )
+from app.services.document_state import can_transition
 
 
 router = APIRouter()
-
-UPLOAD_DIR = "uploaded_files"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 # ======================================================
@@ -38,62 +35,78 @@ class QAPayload(BaseModel):
     sources: str | None = None
 
 
+def get_owned_document(db: Session, document_id: int, user_id: int) -> Document:
+    document = (
+        db.query(Document)
+        .filter(
+            Document.id == document_id,
+            Document.user_id == user_id,
+            Document.is_deleted == False
+        )
+        .first()
+    )
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return document
+
+
+def serialize_metadata(metadata: DocumentMetadata | None):
+    if not metadata:
+        return None
+
+    return DocumentMetadataResponse(
+        id=metadata.id,
+        document_id=metadata.document_id,
+        title=metadata.title,
+        abstract=metadata.abstract,
+        publication_year=metadata.publication_year,
+        source=metadata.source,
+        language=metadata.language or "vi",
+        authors=metadata.authors or [],
+        keywords=metadata.keywords or [],
+        topics=metadata.topics or [],
+        methods=metadata.methods or [],
+        doi=metadata.doi,
+        external_url=metadata.external_url,
+        created_at=metadata.created_at,
+        updated_at=metadata.updated_at,
+    )
+
+
+def serialize_document(document: Document) -> DocumentResponse:
+    return DocumentResponse(
+        id=document.id,
+        filename=document.filename,
+        file_type=document.file_type,
+        status=document.status,
+        user_id=document.user_id,
+        created_at=document.created_at,
+        metadata=serialize_metadata(document.metadata_record),
+    )
+
+
 # ======================================================
 # UPLOAD DOCUMENT
 # ======================================================
 
-@router.post("/upload")
+@router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    # save file
-    file_location = os.path.join(UPLOAD_DIR, file.filename)
-
-    with open(file_location, "wb") as buffer:
-        buffer.write(await file.read())
-
-    # create document
-    document = Document(
-        filename=file.filename,
-        file_type=file.content_type,
+    document = await handle_upload_document(
+        db=db,
+        file=file,
         user_id=current_user.id,
-        status="uploaded",
-    )
-
-    db.add(document)
-    db.commit()
-    db.refresh(document)
-
-    # extract text
-    if file.filename.endswith(".pdf"):
-        raw_text = extract_text_from_pdf(file_location)
-    elif file.filename.endswith(".txt"):
-        raw_text = extract_text_from_txt(file_location)
-    elif file.filename.endswith(".docx"):
-        raw_text = extract_text_from_docx(file_location)
-    else:
-        raw_text = ""
-
-    document.raw_text = raw_text
-    db.commit()
-    db.refresh(document)
-
-    # 🔥 create async job
-    job = DocumentJob(document_id=document.id)
-    db.add(job)
-    db.commit()
-
-    # event publish
-    publish_document_uploaded(
-        document_id=document.id,
-        user_id=current_user.id
     )
 
     return {
         "message": "Upload successful",
         "document_id": document.id,
+        "item": serialize_document(document),
     }
 
 
@@ -101,7 +114,7 @@ async def upload_document(
 # LIST DOCUMENTS (PAGINATION)
 # ======================================================
 
-@router.get("/")
+@router.get("/", response_model=DocumentListResponse)
 def list_documents(
     page: int = 1,
     page_size: int = 10,
@@ -140,7 +153,7 @@ def list_documents(
         "page": page,
         "page_size": page_size,
         "total": total,
-        "items": documents,
+        "items": [serialize_document(document) for document in documents],
     }
 
 
@@ -148,26 +161,52 @@ def list_documents(
 # DOCUMENT DETAIL
 # ======================================================
 
-@router.get("/{document_id}")
+@router.get("/{document_id}", response_model=DocumentResponse)
 def get_document(
     document_id: int,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    document = (
-        db.query(Document)
-        .filter(
-            Document.id == document_id,
-            Document.user_id == current_user.id,
-            Document.is_deleted == False
-        )
-        .first()
-    )
+    document = get_owned_document(db, document_id, current_user.id)
 
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    return serialize_document(document)
 
-    return document
+
+@router.patch("/{document_id}/metadata", response_model=DocumentMetadataResponse)
+def update_document_metadata(
+    document_id: int,
+    payload: DocumentMetadataUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    document = get_owned_document(db, document_id, current_user.id)
+
+    metadata = document.metadata_record
+    if not metadata:
+        metadata = DocumentMetadata(document_id=document.id)
+        db.add(metadata)
+
+    for field, value in payload.dict(exclude_unset=True).items():
+        setattr(metadata, field, value)
+
+    db.commit()
+    db.refresh(metadata)
+
+    return serialize_metadata(metadata)
+
+
+@router.get("/{document_id}/metadata", response_model=DocumentMetadataResponse)
+def get_document_metadata(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    document = get_owned_document(db, document_id, current_user.id)
+
+    if not document.metadata_record:
+        raise HTTPException(status_code=404, detail="Document metadata not found")
+
+    return serialize_metadata(document.metadata_record)
 
 
 # ======================================================
@@ -180,18 +219,7 @@ def delete_document(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    document = (
-        db.query(Document)
-        .filter(
-            Document.id == document_id,
-            Document.user_id == current_user.id,
-            Document.is_deleted == False
-        )
-        .first()
-    )
-
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = get_owned_document(db, document_id, current_user.id)
 
     document.is_deleted = True
     db.commit()
@@ -208,11 +236,9 @@ def update_document_status(
     document_id: int,
     payload: DocumentStatusUpdate,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
-    document = db.query(Document).filter(Document.id == document_id).first()
-
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = get_owned_document(db, document_id, current_user.id)
 
     if not can_transition(document.status, payload.status):
         raise HTTPException(
@@ -232,18 +258,7 @@ def get_document_status(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    document = (
-        db.query(Document)
-        .filter(
-            Document.id == document_id,
-            Document.user_id == current_user.id,
-            Document.is_deleted == False
-        )
-        .first()
-    )
-
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = get_owned_document(db, document_id, current_user.id)
 
     return {"document_id": document.id, "status": document.status}
 

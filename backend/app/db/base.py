@@ -7,4 +7,7 @@ from app.models.refresh_token import RefreshToken
 from app.models.document_chunk import DocumentChunk
 from app.models.document_job import DocumentJob
 from app.models.document_summary import DocumentSummary
+from app.models.document_metadata import DocumentMetadata
+from app.models.document_graph import DocumentGraph
+from app.models.document_recommendation import DocumentRecommendation
 from app.models.qa_history import QAHistory

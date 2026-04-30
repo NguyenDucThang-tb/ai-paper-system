@@ -1,7 +1,11 @@
 ALLOWED_TRANSITIONS = {
-    "uploaded": ["processing"],
+    "uploaded": ["extracting", "processing", "failed"],
+    "extracting": ["chunking", "failed"],
+    "chunking": ["embedding", "failed"],
+    "embedding": ["graphing", "processed", "failed"],
+    "graphing": ["processed", "failed"],
     "processing": ["processed", "failed"],
-    "processed": [],
+    "processed": ["extracting"],
     "failed": [],
 }
 

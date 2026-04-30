@@ -2,7 +2,7 @@ from fastapi import APIRouter, Security
 from app.api.deps import get_current_user
 from app.models.user import User
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter()
 
 @router.get(
     "/dashboard",

@@ -1,8 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
-from sqlalchemy import Enum
-
 from app.db.session import Base
 
 
@@ -41,3 +39,9 @@ class Document(Base):
         cascade="all, delete-orphan"
     )
 
+    metadata_record = relationship(
+        "DocumentMetadata",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )

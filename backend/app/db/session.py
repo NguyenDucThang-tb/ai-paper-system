@@ -2,9 +2,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 
+from app.core.config import settings
 
 
-DATABASE_URL = "postgresql+psycopg2://aipaper_user:123456@localhost:5432/aipaper"
+if not settings.DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is missing")
+DATABASE_URL = settings.DATABASE_URL
 
 engine = create_engine(
     DATABASE_URL,

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+from uuid import uuid4
 
 from jose import jwt
 from passlib.context import CryptContext
@@ -57,7 +58,8 @@ def create_refresh_token(data: Dict[str, Any]) -> str:
     )
     to_encode.update({
         "exp": expire,
-        "type": "refresh"
+        "type": "refresh",
+        "jti": uuid4().hex,
     })
 
     return jwt.encode(

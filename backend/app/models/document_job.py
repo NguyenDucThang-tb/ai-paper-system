@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -14,8 +14,15 @@ class DocumentJob(Base):
         ForeignKey("documents.id", ondelete="CASCADE")
     )
 
+    job_type = Column(String, default="process_document", nullable=False)
     status = Column(String, default="pending")
+    requested_by_user_id = Column(Integer, nullable=True)
+
+    payload = Column(JSON, nullable=True)
+    result = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     retry_count = Column(Integer, default=0)
     last_started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)

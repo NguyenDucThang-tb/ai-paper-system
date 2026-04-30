@@ -14,23 +14,25 @@ class AuthLoggingMiddleware(BaseHTTPMiddleware):
         scopes = []
 
         # READ TOKEN
-        auth_header = request.headers.get("Authorization")
+        auth_header = request.headers.get("Authorization") #lấy token
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header.replace("Bearer ", "")
 
             try:
+                # kiểm tra token hợp lệ
                 payload = jwt.decode(
                     token,
                     settings.SECRET_KEY,
                     algorithms=[settings.ALGORITHM]
                 )
+                # lấy thông tin user
                 user = payload.get("sub", "unknown")
                 role = payload.get("role", "unknown")
                 scopes = payload.get("scopes", [])
             except JWTError:
                 user = "invalid-token"
 
-        # CALL API
+        # gọi API
         response = await call_next(request)
 
         process_time = int((time.time() - start_time) * 1000)

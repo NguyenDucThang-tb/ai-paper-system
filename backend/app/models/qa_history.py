@@ -23,7 +23,7 @@ class QAHistory(Base):
     question = Column(Text, nullable=False)
     answer = Column(Text, nullable=False)
 
-    sources = Column(Text, nullable=True)  # optional json string
+    sources = Column(Text, nullable=True)  # JSON string contract for source chunks
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

@@ -3,6 +3,9 @@ from app.models.document import Document
 from .document_chunk import DocumentChunk
 from .refresh_token import RefreshToken
 from .document_summary import DocumentSummary
+from .document_metadata import DocumentMetadata
+from .document_graph import DocumentGraph
+from .document_recommendation import DocumentRecommendation
 from .qa_history import QAHistory
 from .document_job import DocumentJob
 from .worker_status import WorkerStatus
