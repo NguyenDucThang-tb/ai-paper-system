@@ -21,47 +21,30 @@ export function clearSession() {
 export function getUser() {
   const raw = localStorage.getItem(USER_KEY);
   if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(raw); } catch { return null; }
 }
 
 async function request(baseUrl, path, options = {}) {
   const token = getToken();
-  const headers = {
-    ...(options.headers || {}),
-  };
+  const headers = { ...(options.headers || {}) };
   if (!(options.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
   if (token) headers.Authorization = `Bearer ${token}`;
-
   const res = await fetch(`${baseUrl}${path}`, { ...options, headers });
   const text = await res.text();
   let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = { raw: text };
-  }
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
   if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
   return data;
 }
 
 export async function register(baseUrl, payload) {
-  return request(baseUrl, "/auth/register", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  return request(baseUrl, "/auth/register", { method: "POST", body: JSON.stringify(payload) });
 }
 
 export async function loginEmail(baseUrl, payload) {
-  const data = await request(baseUrl, "/auth/login/email", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  const data = await request(baseUrl, "/auth/login/email", { method: "POST", body: JSON.stringify(payload) });
   setSession(data);
   return data;
 }
@@ -77,19 +60,21 @@ export async function uploadDocument(baseUrl, file) {
 }
 
 export async function listDocuments(baseUrl) {
-  return request(baseUrl, "/documents?page=1&page_size=20");
+  return request(baseUrl, "/documents?page=1&page_size=50");
+}
+
+export async function deleteDocument(baseUrl, documentId) {
+  return request(baseUrl, `/documents/${documentId}`, { method: "DELETE" });
+}
+
+export async function requestDocumentProcessing(baseUrl, documentId) {
+  return request(baseUrl, `/cms/documents/${documentId}/process/request`, { method: "POST" });
 }
 
 export async function requestSummary(baseUrl, documentId, level) {
   return request(baseUrl, `/cms/documents/${documentId}/summary/request`, {
     method: "POST",
     body: JSON.stringify({ level }),
-  });
-}
-
-export async function requestDocumentProcessing(baseUrl, documentId) {
-  return request(baseUrl, `/cms/documents/${documentId}/process/request`, {
-    method: "POST",
   });
 }
 
