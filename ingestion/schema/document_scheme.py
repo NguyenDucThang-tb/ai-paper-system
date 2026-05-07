@@ -49,6 +49,23 @@ class Reference:
     year: Optional[int] = None
 
 @dataclass
+class ChunkMeta:
+    """
+    Metadata của 1 chunk sau khi Qdrant upsert.
+    Dùng làm value trong chunk_map truyền vào graph_builder.build_phase3().
+    
+    qdrant_id: ID đã upsert vào Qdrant — dùng làm MERGE key trong Neo4j
+    section:   tên section gốc, VD: "abstract", "method"
+    page:      số trang trong PDF gốc (None nếu không parse được)
+    text:      nội dung chunk — lưu preview 1000 chars trong Neo4j để debug
+               full text nằm ở Qdrant
+    """
+    qdrant_id: str
+    section:   str = ""
+    page:      Optional[int] = None
+    text:      str = ""
+
+@dataclass
 class UnifiedDocument:
     # Bibliographic
     title: str = "Unknown"
@@ -57,6 +74,7 @@ class UnifiedDocument:
     journal: Optional[str] = None
     doi: Optional[str] = None
     keywords: list[str] = field(default_factory=list)
+    doc_id: Optional[str] = None
 
     # Content
     abstract: str = ""
