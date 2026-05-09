@@ -64,6 +64,7 @@ STEP_PARSE_FIG = "parse_figures"
 STEP_PARSE_TBL = "parse_tables"
 STEP_PARSE_FRM = "parse_formulas"
 STEP_NORMALIZE = "normalize_multimodal"
+STEP_EXTRACT_LM= "extract_metadata_lm"
 STEP_ENRICH    = "enrich_metadata"
 
 ALL_STEPS = [
@@ -75,6 +76,7 @@ ALL_STEPS = [
     STEP_PARSE_TBL,
     STEP_PARSE_FRM,
     STEP_NORMALIZE,
+    STEP_EXTRACT_LM,
     STEP_ENRICH,
 ]
 
@@ -124,6 +126,7 @@ def run_pipeline(
     aggressive_clean:       bool = False,
     multimodal_output_root: str  = "data/multimodal/figures",
     dry_run_enrich:         bool = False,
+    use_lm:                 bool = False,
 ) -> PipelineResult:
     """
     Chạy toàn bộ ingestion pipeline cho một file.
@@ -220,6 +223,16 @@ def run_pipeline(
     result.doc = doc
 
     # ------------------------------------------------------------------ #
+    # STEP 8.5: EXTRACT METADATA LM                                        #
+    # ------------------------------------------------------------------ #
+    if use_lm:
+        doc = _run_step(result, STEP_EXTRACT_LM, _step_extract_lm, doc=doc)
+        if doc is _STEP_FAILED:
+            result.duration_s = time.monotonic() - start_time
+            return result
+        result.doc = doc
+
+    # ------------------------------------------------------------------ #
     # STEP 9: ENRICH METADATA                                              #
     # ------------------------------------------------------------------ #
     doc = _run_step(result, STEP_ENRICH, _step_enrich_metadata,
@@ -253,6 +266,7 @@ def run_pipeline_batch(
     aggressive_clean:       bool = False,
     multimodal_output_root: str  = "data/multimodal/figures",
     dry_run_enrich:         bool = False,
+    use_lm:                 bool = False,
 ) -> list[PipelineResult]:
     """
     Chạy pipeline cho một batch files.
@@ -275,6 +289,7 @@ def run_pipeline_batch(
             aggressive_clean       = aggressive_clean,
             multimodal_output_root = multimodal_output_root,
             dry_run_enrich         = dry_run_enrich,
+            use_lm                 = use_lm,
         )
         results.append(result)
 
@@ -480,6 +495,19 @@ def _step_enrich_metadata(doc: UnifiedDocument, mailto: str, dry_run: bool) -> U
     logger.debug(
         "     Metadata: doi=%s, journal=%s, year=%s, citations=%s",
         result.doi, result.journal, result.year, result.citation_count,
+    )
+    return result
+
+
+def _step_extract_lm(doc: UnifiedDocument) -> UnifiedDocument:
+    """
+    Step 8.5: Extract metadata via local LM (Ollama).
+    """
+    from ingestion.processors.lm_metadata_extractor import extract_metadata_via_lm
+    result = extract_metadata_via_lm(doc)
+    logger.debug(
+        "     LM Metadata applied: title=%s, authors_count=%d",
+        bool(result.title), len(result.authors),
     )
     return result
 
