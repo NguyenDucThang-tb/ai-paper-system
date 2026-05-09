@@ -38,41 +38,30 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Regex để detect heading trong plain text (PDF fallback)
-# Matches: "1. Introduction", "2.3 Related Work", "INTRODUCTION", "Abstract"
-_HEADING_PATTERN = re.compile(
-    r"^(?:"
-    r"(?:\d+[\.\d]*)\s+[A-Z][^\n]{2,60}"   # numbered: "1. Intro", "2.3 Method"
-    r"|"
-    r"[A-Z][A-Z\s]{3,50}[A-Z]"             # ALL CAPS: "INTRODUCTION"
-    r"|"
-    r"(?:Abstract|Introduction|Conclusion|References|Appendix"
-    r"|Related Work|Methodology|Experiments|Results|Discussion"
-    r"|Background|Acknowledgements?|Bibliography)"  # common section names
-    r")$",
-    re.MULTILINE,
-)
-
 # Map section name → section_type
+# SYNC: đồng bộ values với pdf_loader.SECTION_TYPE_MAP
+#   method (không phải methodology), experiment (không phải experiments),
+#   result (không phải results), acknowledgment (không phải acknowledgements),
+#   other (không phải unknown)
 _SECTION_TYPE_MAP: dict[str, str] = {
     "abstract":          "abstract",
     "introduction":      "introduction",
     "related work":      "related_work",
-    "background":        "related_work",
+    "background":        "background",
     "literature":        "related_work",
-    "methodology":       "methodology",
-    "method":            "methodology",
-    "methods":           "methodology",
-    "approach":          "methodology",
-    "proposed":          "methodology",
-    "experiment":        "experiments",
-    "experiments":       "experiments",
-    "experimental":      "experiments",
-    "evaluation":        "experiments",
-    "result":            "results",
-    "results":           "results",
-    "finding":           "results",
-    "findings":          "results",
+    "methodology":       "method",
+    "method":            "method",
+    "methods":           "method",
+    "approach":          "method",
+    "proposed":          "method",
+    "experiment":        "experiment",
+    "experiments":       "experiment",
+    "experimental":      "experiment",
+    "evaluation":        "experiment",
+    "result":            "result",
+    "results":           "result",
+    "finding":           "result",
+    "findings":          "result",
     "discussion":        "discussion",
     "analysis":          "discussion",
     "conclusion":        "conclusion",
@@ -84,9 +73,27 @@ _SECTION_TYPE_MAP: dict[str, str] = {
     "bibliography":      "references",
     "appendix":          "appendix",
     "supplementary":     "appendix",
-    "acknowledgement":   "acknowledgements",
-    "acknowledgements":  "acknowledgements",
-    "acknowledgment":    "acknowledgements",
+    "acknowledgement":   "acknowledgment",
+    "acknowledgements":  "acknowledgment",
+    "acknowledgment":    "acknowledgment",
+    # Tiếng Việt
+    "đặt vấn đề":         "introduction",
+    "giới thiệu":         "introduction",
+    "tổng quan":           "background",
+    "cơ sở lý thuyết":    "background",
+    "phương pháp":         "method",
+    "thiết kế":            "method",
+    "mô hình":             "method",
+    "thuật toán":          "method",
+    "thực nghiệm":         "experiment",
+    "chạy thử":            "experiment",
+    "kết quả":             "result",
+    "kết luận":            "conclusion",
+    "tài liệu tham khảo": "references",
+    "tham khảo":           "references",
+    "thảo luận":           "discussion",
+    "nghiên cứu":          "background",
+    "đánh giá":            "experiment",
 }
 
 # Minimum content length để tính là section hợp lệ
@@ -416,14 +423,16 @@ def _split_by_headings_regex(text: str) -> list[Section]:
     current_level   = 1
     current_lines:  list[str] = []
 
-    for line in lines:
+    for i, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
             if current_lines:
                 current_lines.append("")  # preserve paragraph breaks
             continue
 
-        if _is_heading_line(stripped):
+        next_line = lines[i+1] if i + 1 < len(lines) else ""
+
+        if _is_heading_line(stripped, next_line):
             # Flush
             if current_heading is not None:
                 content = "\n".join(current_lines).strip()
@@ -458,12 +467,84 @@ def _split_by_headings_regex(text: str) -> list[Section]:
     return sections
 
 
-def _is_heading_line(line: str) -> bool:
-    """Kiểm tra một line có phải heading không."""
-    # Quá dài → không phải heading
-    if len(line) > 120:
+def _is_heading_line(line: str, next_line: str = "") -> bool:
+    """
+    Sử dụng heuristic mạnh mẽ để xác định 1 dòng có phải là tiêu đề (heading) không.
+    """
+    line = line.strip()
+    
+    # Quá dài hoặc quá ngắn → không phải heading
+    if len(line) < 3 or len(line) > 120:
         return False
-    return bool(_HEADING_PATTERN.match(line))
+        
+    # Heading phải chứa ít nhất 1 chữ cái (loại bỏ các dòng chỉ chứa số/ký hiệu như "0.81 0.35")
+    if not any(c.isalpha() for c in line):
+        return False
+        
+    # Tiêu đề không bao giờ kết thúc bằng các từ nối/giới từ/mạo từ (do bị cắt dòng giữa chừng)
+    trailing_words = (' bộ', ' và', ' của', ' được', ' là', ' thì', ' mà', ' nhưng', ' cho', ' với', ' này', ' kia', ' các', ' những', ' do', ' ở', ' tại', ' trong', ' trên', ' dưới', ' về', ' việc', ' sự', ' the', ' a', ' an', ' of', ' in', ' on', ' at', ' to', ' for', ' with')
+    if line.lower().endswith(trailing_words):
+        return False
+
+    lower_line = line.lower()
+    
+    # Bỏ qua các Artifact Header/Footer của bài báo
+    blacklist_prefixes = (
+        "tạp chí", "journal of", "khoa học - công nghệ", "khoa học & công nghệ",
+        "khoa học và công nghệ", "nghiên cứu - trao đổi", "nghiên cứu và phát triển", 
+        "thông tin", "issn", "vol.", "số ", "trang ", "page ", "bản quyền", "copyright",
+        "nghiên cứu khoa học", "research journal"
+    )
+    if lower_line.startswith(blacklist_prefixes):
+        return False
+    if "khoa học - công nghệ" in lower_line or "khoa học & công nghệ" in lower_line:
+        return False
+
+    # Không bao giờ là heading nếu chứa các ký tự toán học đặc trưng
+    if any(c in line for c in ['=', '+', '*', '<', '>']):
+        return False
+
+    # Heading của bài báo hiếm khi kết thúc bằng dấu chấm câu (trừ khi là danh sách liệt kê)
+    if line.endswith((".", ",", ";", ":")):
+        # Trừ ngoại lệ mục "References." hoặc tương tự
+        if not line.lower().strip(".") in ["references", "tài liệu tham khảo"]:
+            return False
+
+    # 1. Numbered heading (Arabic: 1. , 1.1 , 1.1.2)
+    # Bắt buộc phải có dấu chấm (vd: 1. hoặc 1.1) hoặc bắt đầu theo chuẩn "1 Introduction" (Viết hoa chữ đầu)
+    if re.match(r"^(?:\d+\.(?:\d+\.?)*)\s+[^\n]{2,}", line):
+        return True
+    if re.match(r"^\d+\s+[A-ZĐ][^\n]{2,}", line): # Kiểu "1 Introduction" hoặc "1 TỔNG QUAN"
+        return True
+
+    # 2. Roman numbered heading (I. , II. , III.)
+    if re.match(r"^(?:[IVXLCDM]+\.)\s+[^\n]{2,}", line):
+        return True
+        
+    # 3. Alphabetical heading (A. , B. , C. ) - Thường dùng trong chuẩn IEEE
+    if re.match(r"^[A-Z]\.\s+[A-ZĐ][^\n]{2,}", line):
+        return True
+
+    # 3. Known exact headings (Case-insensitive)
+    known_headings = {
+        "abstract", "introduction", "conclusion", "references", "appendix",
+        "related work", "methodology", "experiments", "results", "discussion",
+        "background", "acknowledgement", "bibliography",
+        "tóm tắt", "lời cảm ơn", "tài liệu tham khảo",
+        "đặt vấn đề", "giới thiệu", "tổng quan", "cơ sở lý thuyết", 
+        "phương pháp", "thiết kế", "mô hình", "thực nghiệm", "kết quả", "kết luận"
+    }
+    if lower_line in known_headings:
+        return True
+
+    # 4. ALL CAPS (Toàn bộ là chữ in hoa)
+    # Đếm số chữ cái, đảm bảo có chữ và 100% chữ cái là in hoa.
+    # Phải có ít nhất 1 khoảng trắng (2 từ trở lên) để tránh các biến số/công thức.
+    letters = [c for c in line if c.isalpha()]
+    if letters and all(c.isupper() for c in letters) and " " in line:
+        return True
+
+    return False
 
 
 def _infer_heading_level(heading: str) -> int:
@@ -472,16 +553,13 @@ def _infer_heading_level(heading: str) -> int:
       - "1. Title"   → 1
       - "1.2 Title"  → 2
       - "1.2.3 ..."  → 3
-      - ALL CAPS     → 1
-      - Named section → 1
+      - "I. Title"   → 1
+      - ALL CAPS / Named → 1
     """
-    match = re.match(r"^(\d+)(\.(\d+))?(\.(\d+))?", heading)
+    match = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?", heading)
     if match:
-        if match.group(5):
-            return 3
-        if match.group(3):
-            return 2
-        return 1
+        level = sum(1 for g in match.groups() if g is not None)
+        return min(level, 3)
     return 1
 
 
@@ -532,9 +610,14 @@ def _split_by_paragraphs(text: str) -> list[Section]:
 
 def _get_full_text(doc: UnifiedDocument) -> str:
     """
-    Assemble full text từ abstract + sections content.
-    Dùng khi cần text để split.
+    Lấy full text từ document.
+    Ưu tiên doc.full_text (raw OCR text từ pdf_loader).
+    Fallback: assemble từ abstract + sections content.
     """
+    # Ưu tiên full_text đã lưu (từ OCR pipeline)
+    if doc.full_text:
+        return doc.full_text
+
     parts: list[str] = []
     if doc.abstract:
         parts.append(doc.abstract)
@@ -571,21 +654,21 @@ def _infer_section_type(name: str) -> str:
         "1. Introduction"            → "introduction"
         "2.3 RELATED WORK"           → "related_work"
         "Conclusion and Future Work" → "conclusion"
-        "Random Title"               → "unknown"
+        "Random Title"               → "other"
     """
     if not name:
-        return "unknown"
+        return "other"
 
     # Normalize: lowercase, strip số đầu, strip punctuation
     normalized = name.lower()
     normalized = re.sub(r"^\d+[\.\d]*\s*", "", normalized)  # strip "1.2 "
     normalized = re.sub(r"[^\w\s]", " ", normalized).strip()
 
-    for key, section_type in _SECTION_TYPE_MAP.items():
+    for key, section_type in sorted(_SECTION_TYPE_MAP.items(), key=lambda x: -len(x[0])):
         if key in normalized:
             return section_type
 
-    return "unknown"
+    return "other"
 
 
 def _summarize_types(sections: list[Section]) -> str:
@@ -693,12 +776,12 @@ future research directions that could further improve the results.
     type_cases = [
         ("1. Introduction",              "introduction"),
         ("2.3 RELATED WORK",             "related_work"),
-        ("3. Proposed Methodology",      "methodology"),
-        ("4.1 Experimental Results",     "results"),
+        ("3. Proposed Methodology",      "method"),
+        ("4.1 Experimental Results",     "result"),
         ("5. Conclusion and Future Work","conclusion"),
         ("References",                   "references"),
         ("Appendix A: Proofs",           "appendix"),
-        ("Random Unrelated Title",       "unknown"),
+        ("Random Unrelated Title",       "other"),
     ]
     all_pass = True
     for name, expected in type_cases:
@@ -779,13 +862,13 @@ future research directions that could further improve the results.
     grobid_sections = [
         Section(name="Introduction",  content="Intro content here.",  order=5, section_type=None),
         Section(name="Related Work",  content="Related content here.", order=3, section_type=None),
-        Section(name="Random Title",  content="Random content here.",  order=1, section_type="unknown"),
+        Section(name="Random Title",  content="Random content here.",  order=1, section_type="other"),
     ]
     normalized = _normalize_sections(grobid_sections)
     assert normalized[0].order        == 0,              "Should re-index order"
     assert normalized[0].section_type == "introduction", "Should infer introduction"
     assert normalized[1].section_type == "related_work", "Should infer related_work"
-    assert normalized[2].section_type == "unknown",      "Should keep existing type"
+    assert normalized[2].section_type == "other",        "Should keep existing type"
     for s in normalized:
         print(f"  [{s.order}] type={s.section_type:15s} name='{s.name}'")
     print("✓ _normalize_sections OK")
