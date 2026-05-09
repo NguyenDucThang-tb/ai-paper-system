@@ -18,6 +18,7 @@ from app.schemas.cms_ai import (
     RecommendationItem,
     RecommendationResponse,
     SearchRequest,
+    SearchRequestResponse,
     SearchResponse,
     SearchResult,
     SummaryRequest,
@@ -72,6 +73,24 @@ def create_ai_job(
     if document.status in ["uploaded", "failed"]:
         document.status = "processing"
 
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def create_global_ai_job(
+    db: Session,
+    user_id: int,
+    job_type: str,
+    payload: dict | None = None,
+) -> DocumentJob:
+    job = DocumentJob(
+        document_id=None,
+        job_type=job_type,
+        requested_by_user_id=user_id,
+        payload=payload or {},
+    )
+    db.add(job)
     db.commit()
     db.refresh(job)
     return job
@@ -241,13 +260,47 @@ def search_document(
         "query": payload.query,
         "items": [
             SearchResult(
+                chunk_id=chunk.id,
                 document_id=chunk.document_id,
                 chunk_index=chunk.chunk_index,
                 content=chunk.content,
                 score=None,
+                embedding_available=chunk.embedding is not None,
             )
             for chunk in chunks
         ],
+    }
+
+
+@router.post(
+    "/documents/{document_id}/search/request",
+    response_model=SearchRequestResponse,
+)
+def request_document_search(
+    document_id: int,
+    payload: SearchRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    document = get_owned_document(db, document_id, current_user.id)
+    job = create_ai_job(
+        db=db,
+        document=document,
+        user_id=current_user.id,
+        job_type="search",
+        payload={
+            "query": payload.query,
+            "limit": payload.limit,
+            "document_id": document.id,
+        },
+    )
+
+    return {
+        "query": payload.query,
+        "status": job.status,
+        "message": "Search request queued for AI worker",
+        "job_id": job.id,
+        "job_type": job.job_type,
     }
 
 
@@ -274,13 +327,41 @@ def search_my_documents(
         "query": payload.query,
         "items": [
             SearchResult(
+                chunk_id=chunk.id,
                 document_id=chunk.document_id,
                 chunk_index=chunk.chunk_index,
                 content=chunk.content,
                 score=None,
+                embedding_available=chunk.embedding is not None,
             )
             for chunk in chunks
         ],
+    }
+
+
+@router.post("/search/request", response_model=SearchRequestResponse)
+def request_search_my_documents(
+    payload: SearchRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    job = create_global_ai_job(
+        db=db,
+        user_id=current_user.id,
+        job_type="search",
+        payload={
+            "query": payload.query,
+            "limit": payload.limit,
+            "user_id": current_user.id,
+        },
+    )
+
+    return {
+        "query": payload.query,
+        "status": job.status,
+        "message": "Search request queued for AI worker",
+        "job_id": job.id,
+        "job_type": job.job_type,
     }
 
 

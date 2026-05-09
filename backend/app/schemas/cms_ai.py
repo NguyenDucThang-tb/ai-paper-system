@@ -33,15 +33,25 @@ class SearchRequest(BaseModel):
 
 
 class SearchResult(BaseModel):
+    chunk_id: int | None = None
     document_id: int
     chunk_index: int
     content: str
     score: float | None = None
+    embedding_available: bool = False
 
 
 class SearchResponse(BaseModel):
     query: str
     items: list[SearchResult]
+
+
+class SearchRequestResponse(BaseModel):
+    query: str
+    status: str
+    message: str
+    job_id: int
+    job_type: str = "search"
 
 
 class JobRequestResponse(BaseModel):

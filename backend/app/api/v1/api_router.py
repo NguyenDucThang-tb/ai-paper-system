@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import auth, users, admin
 
 # ===== CMS (user-facing features) =====
-from app.api.v1.cms import ai_features, dashboard, documents
+from app.api.v1.cms import ai_features, analytics, dashboard, documents, workspaces
 
 # ===== Internal (AI worker, system) =====
 from app.api.v1.internal import chunks
@@ -43,6 +43,12 @@ api_router.include_router(
 )
 
 api_router.include_router(
+    workspaces.router,
+    prefix="/workspaces",
+    tags=["workspaces"]
+)
+
+api_router.include_router(
     dashboard.router,
     prefix="/cms/dashboard",
     tags=["cms-dashboard"]
@@ -52,6 +58,12 @@ api_router.include_router(
     ai_features.router,
     prefix="/cms",
     tags=["cms-ai"]
+)
+
+api_router.include_router(
+    analytics.router,
+    prefix="/cms/analytics",
+    tags=["cms-analytics"]
 )
 
 # =========================

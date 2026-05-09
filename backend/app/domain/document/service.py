@@ -21,7 +21,8 @@ def add_chunks(db: Session, document_id: int, chunks: list):
         DocumentChunk(
             document_id=document_id,
             content=c["content"],
-            chunk_index=c["chunk_index"]
+            chunk_index=c["chunk_index"],
+            embedding=c.get("embedding"),
         )
         for c in chunks
     ]

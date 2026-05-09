@@ -14,7 +14,12 @@ from app.services.file_extractor import (
 from app.services.event_publisher import publish_document_uploaded
 
 
-async def handle_upload_document(db: Session, file: UploadFile, user_id: int):
+async def handle_upload_document(
+    db: Session,
+    file: UploadFile,
+    user_id: int,
+    workspace_id: int | None = None,
+):
     UPLOAD_DIR = "uploaded_files"
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -29,6 +34,7 @@ async def handle_upload_document(db: Session, file: UploadFile, user_id: int):
         filename=file.filename,
         file_type=file.content_type,
         user_id=user_id,
+        workspace_id=workspace_id,
         status="uploaded",
     )
 

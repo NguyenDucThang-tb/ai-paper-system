@@ -21,3 +21,23 @@ class TokenPayload(BaseModel):
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
     device_id: str | None = None
+
+
+class GoogleLoginRequest(BaseModel):
+    id_token: str
+    device_id: str | None = None
+
+
+class ForgotPasswordSendCodeRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordVerifyCodeRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class ForgotPasswordResetRequest(BaseModel):
+    email: EmailStr
+    code: str
+    new_password: str

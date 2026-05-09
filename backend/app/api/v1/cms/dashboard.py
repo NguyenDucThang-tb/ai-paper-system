@@ -19,6 +19,7 @@ def serialize_document(document: Document) -> DocumentResponse:
         file_type=document.file_type,
         status=document.status,
         user_id=document.user_id,
+        workspace_id=document.workspace_id,
         created_at=document.created_at,
         metadata=None if metadata is None else {
             "id": metadata.id,

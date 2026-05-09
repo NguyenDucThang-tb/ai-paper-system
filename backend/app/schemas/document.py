@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentStatusUpdate(BaseModel):
@@ -31,8 +31,7 @@ class DocumentMetadataResponse(DocumentMetadataBase):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class DocumentResponse(BaseModel):
@@ -41,6 +40,7 @@ class DocumentResponse(BaseModel):
     file_type: str
     status: str
     user_id: int
+    workspace_id: int | None = None
     created_at: datetime | None = None
     metadata: DocumentMetadataResponse | None = None
 

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Text, ForeignKey
+from sqlalchemy import Column, Integer, Text, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 
 from app.db.session import Base
@@ -16,5 +16,6 @@ class DocumentChunk(Base):
 
     chunk_index = Column(Integer)
     content = Column(Text)
+    embedding = Column(JSON, nullable=True)
 
     document = relationship("Document", back_populates="chunks")

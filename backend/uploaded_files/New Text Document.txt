@@ -1,0 +1,170 @@
+paper-rag-kg-system/
+│
+├── data/                                   # (1) DATA LAYER
+│   ├── raw/                                # PDF, DOCX gốc
+│   ├── processed/                          # text đã clean
+│   ├── chunks/                             # chunk cho RAG
+│   ├── multimodal/
+│   │   ├── figures/
+│   │   ├── tables/
+│   │   └── formulas/
+│   ├── embeddings_cache/
+│   └── versioning/                         # DVC
+│
+├── ingestion/                              # (2) INGESTION PIPELINE 🔥
+│   ├── loaders/
+│   │   ├── pdf_loader.py
+│   │   ├── docx_loader.py
+│   │   └── web_loader.py
+│   │
+│   ├── parsers/
+│   │   ├── grobid_parser.py                # structure paper
+│   │   ├── table_parser.py
+│   │   ├── figure_parser.py
+│   │   └── formula_parser.py
+│   │
+│   ├── processors/
+│   │   ├── text_cleaning.py
+│   │   ├── section_splitter.py             # 🔥 chunk theo section
+│   │   ├── metadata_enricher.py
+│   │   └── multimodal_normalizer.py
+│   │
+│   └── pipeline.py                         # ingestion main
+│
+├── ai_module/                              # (3) AI CORE
+│
+│   ├── embedding/
+│   │   ├── embedding_model.py
+│   │   └── embedding_service.py
+│
+│   ├── retrieval/                          # 🔥 KHÔNG chứa LLM
+│   │   ├── vector_retriever.py             # Qdrant
+│   │   ├── graph_retriever.py              # Neo4j
+│   │   └── fusion_retriever.py             # hybrid retrieve
+│
+│   ├── reasoning/                          # 🔥 build context
+│   │   ├── context_builder.py              # graph → text
+│   │   └── prompt_builder.py
+│
+│   ├── inference/                          # 🔥 LLM + dflash
+│   │   ├── llm_engine.py
+│   │   ├── speculative_decoding.py         # dflash
+│   │   ├── draft_model.py
+│   │   ├── target_model.py
+│   │   └── inference_config.py
+│
+│   ├── kg/                                 # Knowledge Graph
+│   │   ├── entity_extractor.py
+│   │   ├── relation_extractor.py
+│   │   ├── graph_builder.py
+│   │   └── graph_updater.py
+│
+│   ├── recommendation/                     # 🔥 NEW (quan trọng)
+│   │   ├── vector_recommender.py
+│   │   ├── graph_recommender.py
+│   │   ├── metadata_recommender.py
+│   │   └── hybrid_recommender.py           # 🔥 core
+│
+│   ├── summarization/
+│   │   ├── summarizer.py
+│   │   └── structured_summary.py
+│
+│   ├── prompts/
+│   │   ├── rag_prompt.txt
+│   │   ├── summary_prompt.txt
+│   │   └── recommendation_prompt.txt
+│
+│   └── utils/
+│       ├── scoring.py
+│       └── metrics.py
+│
+├── storage/                                # (4) DATABASE LAYER
+│   ├── vector_db/
+│   │   └── qdrant_client.py
+│   │
+│   ├── graph_db/
+│   │   └── neo4j_client.py
+│   │
+│   ├── relational_db/
+│   │   └── postgres_client.py
+│   │
+│   └── schemas/
+│       ├── qdrant_schema.json
+│       ├── neo4j_schema.cypher
+│       └── postgres_schema.sql
+│
+├── serving/                                # (5) BACKEND / API
+│   ├── api/
+│   │   ├── main.py                         # FastAPI entry
+│   │   ├── routes/
+│   │   │   ├── upload.py
+│   │   │   ├── rag.py
+│   │   │   ├── summarize.py
+│   │   │   ├── recommendation.py           # 🔥 endpoint mới
+│   │   │   └── graph.py
+│   │   │
+│   │   └── schemas/
+│   │       └── request_response.py
+│   │
+│   ├── services/
+│   │   ├── pipeline_service.py             # orchestrate toàn flow
+│   │   ├── rag_service.py
+│   │   ├── kg_service.py
+│   │   ├── summary_service.py
+│   │   └── recommendation_service.py       # 🔥
+│   │
+│   ├── workers/
+│   │   └── celery_worker.py
+│   │
+│   └── config/
+│       └── settings.py
+│
+├── qa_ba/                                  # (6) TEST + EVAL
+│   ├── tests/
+│   │   ├── test_rag.py
+│   │   ├── test_kg.py
+│   │   ├── test_recommendation.py
+│   │   └── test_ingestion.py
+│   │
+│   ├── evaluation/
+│   │   ├── rag_metrics.py
+│   │   ├── summary_metrics.py
+│   │   ├── rec_metrics.py                  # 🔥
+│   │   └── hallucination_check.py
+│   │
+│   └── monitoring/
+│       ├── logging.py
+│       └── drift_detection.py
+│
+├── frontend/                               # (7) UI
+│   ├── web_app/                            # React/Vue
+│   └── dashboard/
+│       └── streamlit_app.py
+│
+├── infra/                                  # (8) DEVOPS
+│   ├── docker/
+│   │   ├── Dockerfile.api
+│   │   ├── Dockerfile.worker
+│   │   └── Dockerfile.frontend
+│   │
+│   ├── docker-compose.yml                  # Qdrant + Neo4j + Postgres
+│   │
+│   └── ci_cd/
+│       └── github_actions.yml
+│
+├── scripts/                                # (9) UTIL SCRIPT
+│   ├── ingest_data.py
+│   ├── build_kg.py
+│   ├── run_rag.py
+│   └── run_recommendation.py
+│
+├── docs/                                   # (10) DOCUMENTATION
+│   ├── architecture.md
+│   ├── rag_kg_design.md
+│   ├── recommendation.md
+│   └── api_docs.md
+│
+├── .env
+├── requirements.txt
+├── README.md
+└── dvc.yaml
