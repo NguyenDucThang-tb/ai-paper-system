@@ -117,84 +117,7 @@ def _is_bad_abstract(abstract: str) -> bool:
     return len(stripped) < 50
 
 
-def _try_lm_metadata(doc: UnifiedDocument, model: str = "qwen2.5:7b") -> UnifiedDocument:
-    """
-    Thử extract metadata bằng LM (Ollama).
-    Nếu LM fail → trả về doc gốc (regex fallback đã có từ pdf_loader).
 
-    Merge strategy:
-      - Fields trống → luôn fill từ LM
-      - Fields có dữ liệu "rác" (authors sai, abstract quá ngắn) → override bằng LM
-      - Fields đã tốt → giữ nguyên (không overwrite)
-    """
-    from dataclasses import replace
-
-    try:
-        from ai_module.inference.llm_engine import extract_metadata_lm, is_ollama_available
-
-        if not is_ollama_available(model):
-            logger.warning("Ollama not available — skipping LM metadata extraction")
-            return doc
-
-        # Dùng full_text từ OCR pipeline
-        text = doc.full_text or ""
-        if not text:
-            logger.debug("No full_text available for LM extraction")
-            return doc
-
-        meta = extract_metadata_lm(text, model=model)
-        if not meta:
-            logger.debug("LM returned empty metadata")
-            return doc
-
-        # Merge — fill trống + override dữ liệu rác
-        updates = {}
-
-        # Title: luôn override bằng LM (LM thường trích xuất chính xác hơn)
-        if meta.get("title") and meta["title"] != "Unknown":
-            if doc.title != meta["title"]:
-                updates["title"] = meta["title"]
-
-        # Authors: luôn ưu tiên LM vì regex dễ bị nhiễu do layout
-        if meta.get("authors") and len(meta["authors"]) > 0:
-            if doc.authors != meta["authors"]:
-                logger.info("LM overriding authors: %s → %s", doc.authors, meta["authors"])
-                updates["authors"] = meta["authors"]
-
-        # Abstract: luôn ưu tiên LM nếu LM trích xuất được
-        if meta.get("abstract") and len(meta["abstract"]) > 50:
-            if doc.abstract != meta["abstract"]:
-                updates["abstract"] = meta["abstract"]
-
-        # Keywords: chỉ fill nếu trống
-        if meta.get("keywords") and not doc.keywords:
-            updates["keywords"] = meta["keywords"]
-
-        # Year: chỉ fill nếu trống
-        if meta.get("year") and doc.year is None:
-            updates["year"] = meta["year"]
-
-        # Journal: chỉ fill nếu trống
-        if meta.get("journal") and doc.journal is None:
-            updates["journal"] = meta["journal"]
-
-        # Language: chỉ fill nếu trống
-        if meta.get("language") and doc.language is None:
-            updates["language"] = meta["language"]
-
-        if updates:
-            logger.info(f"LM enriched fields: {list(updates.keys())}")
-            return replace(doc, **updates)
-        else:
-            logger.debug("LM metadata — all fields already filled & valid")
-            return doc
-
-    except ImportError as e:
-        logger.warning(f"LM module not available: {e}")
-        return doc
-    except Exception as e:
-        logger.warning(f"LM metadata extraction error: {e}")
-        return doc
 
 
 # ---------------------------------------------------------------------------
@@ -339,14 +262,11 @@ Examples:
                 aggressive_clean=args.aggressive,
                 multimodal_output_root=str(file_output_dir / "figures"),
                 dry_run_enrich=args.dry_run_enrich,
+                use_lm=args.use_lm,
             )
             
             if result.success and result.doc:
                 doc = result.doc
-                
-                # LM metadata extraction (optional)
-                if args.use_lm:
-                    doc = _try_lm_metadata(doc, model=args.lm_model)
 
                 # Save
                 try:
@@ -405,14 +325,11 @@ Examples:
         file_path=args.path,
         aggressive_clean=args.aggressive,
         dry_run_enrich=args.dry_run_enrich,
+        use_lm=args.use_lm,
     )
 
     if result.success and result.doc:
         doc = result.doc
-
-        # LM metadata extraction (optional)
-        if args.use_lm:
-            doc = _try_lm_metadata(doc, model=args.lm_model)
 
         # Save
         sub_dir = Path(args.path).parent.name
