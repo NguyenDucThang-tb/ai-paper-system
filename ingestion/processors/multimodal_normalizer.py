@@ -250,11 +250,17 @@ def _normalize_html_figures(
 
 def _extract_images_from_pdf(source_file: str) -> list[dict]:
     """
-    Extract all images từ PDF dùng PyMuPDF.
+    Extract all images từ PDF dùng PyMuPDF, tự động merge tile images.
+
+    Nhiều PDF (đặc biệt "Print to PDF") chia 1 figure thành 2+ tile images
+    xếp chồng nhau theo chiều dọc. Logic tile-merge:
+      - Cùng x0, x1 (thẳng hàng ngang) với tolerance 5px
+      - y1 của ảnh trên ≈ y0 của ảnh dưới (liền kề dọc) tolerance 5px
+      - Cùng pixel width
 
     Returns:
         list of {"data": bytes, "ext": ".png"}
-        Sorted theo thứ tự xuất hiện (page order).
+        Sorted theo thứ tự xuất hiện (page order), tiles đã được merge.
     """
     blobs = []
     try:
@@ -262,25 +268,42 @@ def _extract_images_from_pdf(source_file: str) -> list[dict]:
 
         doc = fitz.open(source_file)
         for page_num, page in enumerate(doc):
-            for img_info in page.get_images(full=True):
-                xref = img_info[0]
-                try:
-                    base_image = doc.extract_image(xref)
-                    data       = base_image["image"]
-                    ext_str    = base_image.get("ext", "png").lower()
+            page_infos = _collect_page_images(doc, page)
 
-                    if len(data) < MIN_IMAGE_SIZE:
-                        logger.debug(f"Skipping small image xref={xref} ({len(data)} bytes)")
-                        continue
+            # Lọc ảnh quá nhỏ (icons, watermarks)
+            page_infos = [
+                info for info in page_infos
+                if info["w"] >= 80 and info["h"] >= 80
+                and len(info["data"]) >= MIN_IMAGE_SIZE
+            ]
 
-                    ext = IMAGE_EXT_MAP.get(ext_str, ".png")
-                    blobs.append({"data": data, "ext": ext})
+            if not page_infos:
+                continue
 
-                except Exception as e:
-                    logger.debug(f"Failed to extract image xref={xref} on page {page_num + 1}: {e}")
+            # Detect tile groups và merge
+            tile_groups = _find_tile_groups_normalizer(page_infos)
+
+            for group in tile_groups:
+                tiles = [page_infos[k] for k in group]
+
+                if len(tiles) == 1:
+                    # Ảnh đơn — giữ nguyên
+                    data    = tiles[0]["data"]
+                    ext_str = tiles[0].get("ext", "png").lower()
+                    ext     = IMAGE_EXT_MAP.get(ext_str, ".png")
+                else:
+                    # Merge tiles theo chiều dọc
+                    data, ext_str = _merge_tile_blobs(tiles)
+                    ext = f".{ext_str}"
+                    logger.debug(
+                        f"Page {page_num + 1}: merged {len(tiles)} tile images "
+                        f"(xrefs={[t['xref'] for t in tiles]})"
+                    )
+
+                blobs.append({"data": data, "ext": ext})
 
         doc.close()
-        logger.debug(f"Extracted {len(blobs)} images from PDF: {source_file}")
+        logger.debug(f"Extracted {len(blobs)} images (after tile-merge) from PDF: {source_file}")
 
     except ImportError:
         logger.warning("PyMuPDF not installed — cannot extract PDF images. Run: pip install pymupdf")
@@ -288,6 +311,116 @@ def _extract_images_from_pdf(source_file: str) -> list[dict]:
         logger.error(f"PDF image extraction failed: {e}")
 
     return blobs
+
+
+def _collect_page_images(fitz_doc, page) -> list[dict]:
+    """Thu thập metadata + data từng ảnh nhúng trong trang."""
+    infos = []
+    for img_info in page.get_images(full=True):
+        xref = img_info[0]
+        try:
+            rects = page.get_image_rects(xref)
+            base  = fitz_doc.extract_image(xref)
+            if not rects:
+                continue
+            infos.append({
+                "xref": xref,
+                "rect": rects[0],
+                "w":    base["width"],
+                "h":    base["height"],
+                "ext":  base.get("ext", "png"),
+                "data": base["image"],
+            })
+        except Exception as e:
+            logger.debug(f"Failed to extract image xref={xref}: {e}")
+    return infos
+
+
+def _find_tile_groups_normalizer(infos: list[dict]) -> list[list[int]]:
+    """
+    Phát hiện nhóm ảnh là tile của nhau (vertical split).
+
+    Criteria:
+      - Cùng x0, x1 (tolerance 5px)
+      - y1 của ảnh trên ≈ y0 của ảnh dưới (tolerance 5px)
+      - Cùng pixel width
+
+    Returns:
+        list các nhóm index, mỗi nhóm sorted top→bottom.
+    """
+    TOLERANCE = 5  # px tolerance cho vị trí
+
+    n       = len(infos)
+    visited = [False] * n
+    groups  = []
+
+    for i in range(n):
+        if visited[i]:
+            continue
+        group = [i]
+        visited[i] = True
+
+        # Tìm tất cả tiles liền kề với group hiện tại (greedy expansion)
+        changed = True
+        while changed:
+            changed = False
+            for j in range(n):
+                if visited[j]:
+                    continue
+                # Kiểm tra j có liền kề với bất kỳ member nào trong group
+                for k in group:
+                    if _are_vertical_tiles(infos[k], infos[j], TOLERANCE):
+                        group.append(j)
+                        visited[j] = True
+                        changed = True
+                        break
+
+        groups.append(sorted(group, key=lambda idx: infos[idx]["rect"].y0))
+
+    return groups
+
+
+def _are_vertical_tiles(a: dict, b: dict, tolerance: float = 5) -> bool:
+    """Kiểm tra 2 ảnh có phải là vertical tiles (nửa trên + nửa dưới)."""
+    # Cùng x range (thẳng hàng ngang)
+    same_x = (abs(a["rect"].x0 - b["rect"].x0) < tolerance and
+              abs(a["rect"].x1 - b["rect"].x1) < tolerance)
+    if not same_x:
+        return False
+
+    # Cùng pixel width
+    if a["w"] != b["w"]:
+        return False
+
+    # Liền kề theo chiều dọc (y1 của ảnh trên ≈ y0 của ảnh dưới)
+    adjacent = (abs(a["rect"].y1 - b["rect"].y0) < tolerance or
+                abs(b["rect"].y1 - a["rect"].y0) < tolerance)
+    return adjacent
+
+
+def _merge_tile_blobs(tiles: list[dict]) -> tuple[bytes, str]:
+    """
+    Ghép các tile images theo chiều dọc (top→bottom).
+
+    Returns:
+        (merged_bytes, format_string) — e.g. (bytes, "jpeg")
+    """
+    import io
+    from PIL import Image
+
+    imgs    = [Image.open(io.BytesIO(t["data"])) for t in tiles]
+    total_h = sum(im.height for im in imgs)
+    max_w   = max(im.width for im in imgs)
+    canvas  = Image.new("RGB", (max_w, total_h))
+
+    y_off = 0
+    for im in imgs:
+        canvas.paste(im, (0, y_off))
+        y_off += im.height
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="JPEG", quality=95)
+    return buf.getvalue(), "jpg"
 
 
 # ---------------------------------------------------------------------------
