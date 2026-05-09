@@ -61,6 +61,43 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
+# OCR diacritics fix: PaddleOCR PP-OCRv5 server model nhầm dấu thanh tiếng Việt
+# thành macron (ˉ) và caron (ˇ) — các ký tự này KHÔNG tồn tại trong tiếng Việt.
+#
+# Mapping: non-Vietnamese diacritic → closest Vietnamese base vowel
+#   macron vowels: ē→ê, ō→ô, ā→â, ū→ư (nhầm circumflex/horn thành macron)
+#   caron vowels:  ǎ→ă, ǔ→ủ, ǒ→ỏ, ī→ị
+#
+# Lưu ý: mapping chỉ sửa nguyên âm gốc (base vowel), KHÔNG phục hồi được dấu
+# thanh chính xác (vd: "hê" thay vì "hệ"). Tuy nhiên đây là safe replacement
+# vì macron/caron vowels không bao giờ hợp lệ trong tiếng Việt.
+_OCR_DIACRITIC_MAP: dict[str, str] = {
+    # Lowercase macron → Vietnamese circumflex/horn
+    "\u0113": "\u00ea",  # ē → ê (macron → circumflex)
+    "\u014d": "\u00f4",  # ō → ô (macron → circumflex)
+    "\u0101": "\u00e2",  # ā → â (macron → circumflex)
+    "\u016b": "\u01b0",  # ū → ư (macron → horn)
+    # Lowercase caron → Vietnamese breve/tone marks
+    "\u01ce": "\u0103",  # ǎ → ă (caron → breve)
+    "\u01d4": "\u1ee7",  # ǔ → ủ (caron u → hỏi tone)
+    "\u01d2": "\u1ecf",  # ǒ → ỏ (caron o → hỏi tone)
+    "\u012b": "\u1ecb",  # ī → ị (macron i → nặng tone)
+    # Uppercase equivalents
+    "\u0112": "\u00ca",  # Ē → Ê
+    "\u014c": "\u00d4",  # Ō → Ô
+    "\u0100": "\u00c2",  # Ā → Â
+    "\u016a": "\u01af",  # Ū → Ư
+    "\u01cd": "\u0102",  # Ǎ → Ă
+    "\u01d3": "\u1ee6",  # Ǔ → Ủ
+    "\u01d1": "\u1ece",  # Ǒ → Ỏ
+    "\u012a": "\u1eca",  # Ī → Ị
+}
+
+# Precompile regex for fast OCR diacritic detection
+_OCR_DIACRITIC_CHARS = re.compile(
+    "[" + re.escape("".join(_OCR_DIACRITIC_MAP.keys())) + "]"
+)
+
 # Unicode ligature map — chỉ typography ligatures từ PDF rendering
 # KHÔNG bao gồm æ/œ vì chúng là legitimate Unicode trong tên người, địa danh, journal names
 _LIGATURE_MAP: dict[str, str] = {
@@ -422,13 +459,18 @@ def _clean_metadata_string(text: str) -> str:
 def _normalize_unicode(text: str) -> str:
     """
     1a. NFC normalization
-    1b. Ligature expansion (ﬁ→fi, ﬀ→ff, ...) — chỉ typography ligatures
-    1c. Smart quotes → ASCII
-    1d. Non-breaking space → regular space
-    1e. Zero-width / invisible chars removal
+    1b. OCR diacritics fix (macron/caron → Vietnamese base vowels)
+    1c. Ligature expansion (ﬁ→fi, ﬀ→ff, ...) — chỉ typography ligatures
+    1d. Smart quotes → ASCII
+    1e. Non-breaking space → regular space
+    1f. Zero-width / invisible chars removal
     """
     # NFC
     text = unicodedata.normalize("NFC", text)
+
+    # OCR diacritics fix (PaddleOCR PP-OCRv5 nhầm dấu thanh tiếng Việt)
+    # macron/caron vowels → Vietnamese base vowels (safe: these chars never valid in VN)
+    text = _fix_ocr_diacritics(text)
 
     # Ligatures (chỉ PDF typography artifacts)
     for ligature, replacement in _LIGATURE_MAP.items():
@@ -446,6 +488,31 @@ def _normalize_unicode(text: str) -> str:
     # Zero-width / invisible chars (không bao gồm \u00a0 — đã xử lý trên)
     text = _INVISIBLE_CHARS.sub("", text)
 
+    return text
+
+
+def _fix_ocr_diacritics(text: str) -> str:
+    """
+    Fix lỗi dấu thanh tiếng Việt từ PaddleOCR PP-OCRv5.
+
+    PaddleOCR server model nhận diện sai dấu thanh tiếng Việt thành
+    macron (ˉ) và caron (ˇ) — các ký tự không hợp lệ trong tiếng Việt:
+      ē → ê, ō → ô, ā → â, ū → ư  (macron → circumflex/horn)
+      ǎ → ă, ǔ → ủ, ǒ → ỏ, ī → ị  (caron → breve/tone)
+
+    Chỉ chạy replacement khi phát hiện ký tự bất thường trong text,
+    tránh overhead cho text đã sạch.
+    """
+    # Quick check: có ký tự macron/caron không? Nếu không → skip
+    if not _OCR_DIACRITIC_CHARS.search(text):
+        return text
+
+    # Replace từng ký tự bất thường
+    for bad_char, good_char in _OCR_DIACRITIC_MAP.items():
+        if bad_char in text:
+            text = text.replace(bad_char, good_char)
+
+    logger.debug("Fixed OCR diacritics in text")
     return text
 
 
