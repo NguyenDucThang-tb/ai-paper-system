@@ -16,7 +16,7 @@ class DocumentRecommendation(Base):
         nullable=False,
     )
 
-    recommended_document_id = Column(Integer, nullable=True)
+    recommended_document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
     title = Column(String, nullable=False)
     reason = Column(Text, nullable=True)
     score = Column(Float, nullable=True)

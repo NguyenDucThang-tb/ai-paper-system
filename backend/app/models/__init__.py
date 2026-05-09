@@ -11,3 +11,4 @@ from .qa_history import QAHistory
 from .document_job import DocumentJob
 from .worker_status import WorkerStatus
 from .password_reset_code import PasswordResetCode
+from .login_event import LoginEvent

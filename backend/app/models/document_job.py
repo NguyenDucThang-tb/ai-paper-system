@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -16,7 +17,7 @@ class DocumentJob(Base):
 
     job_type = Column(String, default="process_document", nullable=False)
     status = Column(String, default="pending")
-    requested_by_user_id = Column(Integer, nullable=True)
+    requested_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
 
     payload = Column(JSON, nullable=True)
     result = Column(JSON, nullable=True)
@@ -26,3 +27,5 @@ class DocumentJob(Base):
     retry_count = Column(Integer, default=0)
     last_started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User")
