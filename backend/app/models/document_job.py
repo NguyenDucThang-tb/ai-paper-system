@@ -16,7 +16,7 @@ class DocumentJob(Base):
     )
 
     job_type = Column(String, default="process_document", nullable=False)
-    status = Column(String, default="pending")
+    status = Column(String, default="pending", nullable=False)
     requested_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
 
     payload = Column(JSON, nullable=True)

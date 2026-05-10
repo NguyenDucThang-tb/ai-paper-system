@@ -1,4 +1,4 @@
-from app.core.database import engine
+from app.db.session import engine
 
 def test_connection():
     try:

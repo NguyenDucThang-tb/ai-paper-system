@@ -39,10 +39,11 @@ class Settings:
     MAIL_PORT: int = int(os.getenv("MAIL_PORT", os.getenv("SMTP_PORT", "587")))
     MAIL_STARTTLS: bool = os.getenv("MAIL_STARTTLS", os.getenv("SMTP_USE_TLS", "true")).lower() == "true"
     MAIL_SSL_TLS: bool = os.getenv("MAIL_SSL_TLS", "false").lower() == "true"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7  
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
-        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60)
+        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60")
+    )
+    REFRESH_TOKEN_EXPIRE_DAYS: int = int(
+        os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7")
     )
 
     DATABASE_URL: str | None = os.getenv("DATABASE_URL")
@@ -51,8 +52,6 @@ class Settings:
     )
 
     def __init__(self):
-        print("🔑 ENV_PATH =", ENV_PATH)
-        print("🔑 SECRET_KEY =", repr(self.SECRET_KEY))
         if not isinstance(self.SECRET_KEY, str):
             raise RuntimeError("❌ SECRET_KEY is missing or not a string")
 

@@ -1,6 +1,5 @@
-from app.core.database import engine, Base
-from app.models import user, document
-from app.models.document_summary import DocumentSummary
+from app.db.session import engine
+from app.db.base import Base
 
 
 print("⏳ Creating tables...")

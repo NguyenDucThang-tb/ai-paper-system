@@ -13,7 +13,7 @@ class Document(Base):
     file_type = Column(String, nullable=False)  # pdf, docx, txt
 
     raw_text = Column(Text, nullable=True)
-    status = Column(String, default="uploaded")
+    status = Column(String, default="uploaded", nullable=False)
 
 
     user_id = Column(
