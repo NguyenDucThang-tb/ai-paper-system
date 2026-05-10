@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { api } from "@/lib/api";
+import { api, API_BASE } from "@/lib/api";
 
 function getButtonLabel(mode) {
   if (mode === "signup_with") return "Đăng ký bằng Gmail";
@@ -13,7 +13,7 @@ export function GoogleLoginButton({ text = "signin_with", onError }) {
   async function handleClick() {
     setLoading(true);
     try {
-      const response = await fetch("/api/v1/auth/google/config");
+      const response = await fetch(`${API_BASE}/auth/google/config`);
       const config = await response.json();
 
       if (!config?.redirect_enabled) {
