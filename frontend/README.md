@@ -47,5 +47,6 @@ Project settings:
 Environment Variable:
 
 - `VITE_API_BASE_URL=https://your-api-domain/api/v1`
+- On Vercel, set this variable for both `Production` and `Preview` environments.
 
 `vercel.json` is configured for SPA rewrites so routes like `/login`, `/library`, `/document/:id` work after refresh.
