@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "https://triumphant-charisma-production-f2a9.up.railway.app/api/v1";
 
 function getToken() {
   return localStorage.getItem("access_token");
