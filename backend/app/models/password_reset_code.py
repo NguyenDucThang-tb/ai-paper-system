@@ -1,5 +1,5 @@
-from sqlalchemy import Column, DateTime, Integer, String
-from sqlalchemy.sql import func
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
 
@@ -7,10 +7,11 @@ from app.db.session import Base
 class PasswordResetCode(Base):
     __tablename__ = "password_reset_codes"
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, index=True, nullable=False)
-    code_hash = Column(String, index=True, nullable=False)
-    expires_at = Column(DateTime(timezone=True), nullable=False)
-    used_at = Column(DateTime(timezone=True), nullable=True)
-    attempts = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    code_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+

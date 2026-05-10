@@ -17,7 +17,6 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { documents as fallbackDocuments, qaHistory } from "@/lib/mockData";
 import { api } from "@/lib/api";
 import { mapApiDocument, mapApiDocuments } from "@/lib/documentMapper";
 
@@ -61,21 +60,31 @@ function SourceItem({ doc, active, onSelect }) {
 export default function DocumentDetailPage() {
   const { id, workspaceId } = useParams();
   const navigate = useNavigate();
-  const fallbackDocument = useMemo(
-    () => fallbackDocuments.find((item) => String(item.id) === String(id)) || fallbackDocuments[0],
-    [id],
+  const emptyDocument = useMemo(
+    () => ({
+      id: null,
+      title: "Untitled notebook",
+      filename: "Chưa có nguồn",
+      abstract: "Thêm nguồn ở cột trái để bắt đầu hỏi đáp và tóm tắt.",
+      status: "uploaded",
+      authors: [],
+      topics: [],
+      updated: "",
+    }),
+    [],
   );
 
-  const [document, setDocument] = useState(fallbackDocument);
+  const [document, setDocument] = useState(emptyDocument);
   const [workspace, setWorkspace] = useState(null);
-  const [sources, setSources] = useState(fallbackDocuments);
-  const [qaItems, setQaItems] = useState(qaHistory);
+  const [sources, setSources] = useState([]);
+  const [qaItems, setQaItems] = useState([]);
   const [summary, setSummary] = useState(null);
   const [recommendations, setRecommendations] = useState([]);
   const [question, setQuestion] = useState("");
   const [sourceQuery, setSourceQuery] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
+  const [loading, setLoading] = useState(true);
   const [recommendationMode, setRecommendationMode] = useState("author");
 
   useEffect(() => {
@@ -84,11 +93,13 @@ export default function DocumentDetailPage() {
   }, [id, workspaceId]);
 
   async function loadWorkspace() {
+    setLoading(true);
     setMessage("");
     if (workspaceId) {
       const workspaceResponse = await Promise.allSettled([api.getWorkspace(workspaceId)]);
       if (workspaceResponse[0].status !== "fulfilled") {
         setMessage("Không tải được phiên làm việc. Bạn cần đăng nhập lại hoặc kiểm tra backend.");
+        setLoading(false);
         return;
       }
 
@@ -103,23 +114,20 @@ export default function DocumentDetailPage() {
 
       if (!currentDocument) {
         setDocument({
-          ...fallbackDocument,
+          ...emptyDocument,
           id: null,
           title: nextWorkspace.title || "Untitled notebook",
-          filename: "Chưa có nguồn",
-          abstract: "Thêm nguồn ở cột trái để bắt đầu hỏi đáp và tóm tắt.",
-          status: "uploaded",
-          authors: [],
-          topics: [],
         });
         setQaItems([]);
         setSummary(null);
         setRecommendations([]);
+        setLoading(false);
         return;
       }
 
       setDocument(currentDocument);
       await loadDocumentFeatures(currentDocument.id);
+      setLoading(false);
       return;
     }
 
@@ -132,7 +140,7 @@ export default function DocumentDetailPage() {
         api.getRecommendations(id),
       ]);
 
-    if (docsResponse.status === "fulfilled") setSources(mapApiDocuments(docsResponse.value, fallbackDocuments));
+    if (docsResponse.status === "fulfilled") setSources(mapApiDocuments(docsResponse.value, []));
     if (docResponse.status === "fulfilled") setDocument(mapApiDocument(docResponse.value));
     if (qaResponse.status === "fulfilled" && qaResponse.value?.length) {
       setQaItems(
@@ -147,8 +155,9 @@ export default function DocumentDetailPage() {
     if (recResponse.status === "fulfilled") setRecommendations(recResponse.value.items || []);
 
     if (docResponse.status === "rejected") {
-      setMessage("Không tải được tài liệu thật. Đang dùng dữ liệu mẫu hoặc bạn cần đăng nhập lại.");
+      setMessage("Không tải được tài liệu. Bạn cần đăng nhập lại hoặc kiểm tra backend.");
     }
+    setLoading(false);
   }
 
   async function loadDocumentFeatures(documentId) {
@@ -259,6 +268,17 @@ export default function DocumentDetailPage() {
   const sourceCount = sources.length;
   const notebookTitle = workspace?.title || document.title || "Untitled notebook";
 
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#eef1fb] text-zinc-700">
+        <div className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          <span>Đang tải notebook...</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#eef1fb] text-zinc-950">
       <header className="flex h-[84px] items-center justify-between px-6">
@@ -286,14 +306,14 @@ export default function DocumentDetailPage() {
         </div>
       </header>
 
-      <main className="grid h-[calc(100vh-84px)] gap-5 px-5 pb-5 xl:grid-cols-[360px_minmax(460px,1fr)_420px]">
-        <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg bg-white">
+      <main className="grid min-h-[calc(100vh-84px)] gap-5 px-5 pb-5 xl:h-[calc(100vh-84px)] xl:grid-cols-[360px_minmax(460px,1fr)_420px]">
+        <aside className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:overflow-hidden">
           <div className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-5">
             <h2 className="text-lg font-medium">Nguồn tài liệu</h2>
             <PanelLeft className="h-5 w-5 text-zinc-600" />
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto p-5">
+          <div className="flex-1 p-5 xl:min-h-0 xl:overflow-y-auto">
             <label className="flex h-12 w-full cursor-pointer items-center justify-center rounded-full border border-zinc-300 bg-white text-sm font-medium hover:border-zinc-600">
               {busy === "upload" ? <Loader2 className="mr-3 h-5 w-5 animate-spin" /> : <Plus className="mr-3 h-5 w-5" />}
               Thêm nguồn
@@ -378,13 +398,13 @@ export default function DocumentDetailPage() {
           </div>
         </aside>
 
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg bg-white">
+        <section className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:overflow-hidden">
           <div className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-5">
             <h2 className="text-lg font-medium">Cuộc trò chuyện</h2>
             <MoreVertical className="h-5 w-5 text-zinc-600" />
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-7 py-8">
+          <div className="flex-1 px-7 py-8 xl:min-h-0 xl:overflow-y-auto">
             {message && <div className="mb-5 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">{message}</div>}
             <div className="mx-auto max-w-3xl">
               <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-[#eef1fb] text-violet-700">
@@ -422,7 +442,9 @@ export default function DocumentDetailPage() {
                 className="h-14 min-w-0 flex-1 px-4 text-base outline-none"
                 placeholder="Hỏi về tài liệu này..."
               />
-              <span className="hidden text-sm text-zinc-600 sm:inline">1 nguồn đang chọn</span>
+              <span className="hidden text-sm text-zinc-600 sm:inline">
+                {document?.id ? "1 nguồn đang chọn" : "Chưa chọn nguồn"}
+              </span>
               <Button onClick={handleAskQuestion} disabled={busy === "qa" || !document.id} size="icon" className="h-12 w-12 rounded-full bg-zinc-200 text-zinc-700 hover:bg-zinc-300">
                 {busy === "qa" ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
               </Button>
@@ -433,13 +455,13 @@ export default function DocumentDetailPage() {
           </div>
         </section>
 
-        <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg bg-white">
+        <aside className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:overflow-hidden">
           <div className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-5">
             <h2 className="text-lg font-medium">Studio</h2>
             <PanelRight className="h-5 w-5 text-zinc-600" />
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto p-5">
+          <div className="flex-1 p-5 xl:min-h-0 xl:overflow-y-auto">
             <section className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5">
               <div className="flex items-center justify-between gap-3 text-zinc-900">
                 <div className="flex items-center gap-2">

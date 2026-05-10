@@ -1,5 +1,4 @@
-const ENV_API_BASE = import.meta.env.VITE_API_BASE_URL;
-export const API_BASE = ENV_API_BASE || (import.meta.env.DEV ? "/api/v1" : "");
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
 
 function getToken() {
   return localStorage.getItem("access_token");
@@ -23,9 +22,6 @@ function clearSession() {
 }
 
 async function request(path, options = {}) {
-  if (!API_BASE) {
-    throw new Error("Thiếu VITE_API_BASE_URL trên môi trường deploy frontend.");
-  }
   const token = getToken();
   const headers = {
     ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
@@ -80,8 +76,8 @@ export const api = {
     return data;
   },
   startGoogleLogin: () => {
-    if (!API_BASE) throw new Error("Thiếu VITE_API_BASE_URL trên môi trường deploy frontend.");
-    window.location.href = `${API_BASE}/auth/google/login`;
+    const frontendOrigin = encodeURIComponent(window.location.origin);
+    window.location.href = `${API_BASE}/auth/google/login?frontend_origin=${frontendOrigin}`;
   },
   register: (payload) =>
     request("/auth/register", {

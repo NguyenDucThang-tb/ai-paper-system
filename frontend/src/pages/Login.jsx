@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Eye, EyeOff, Lock, Mail } from "lucide-react";
 
 import { GoogleLoginButton } from "@/components/auth/GoogleLoginButton";
@@ -8,12 +8,22 @@ import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 
 export default function LoginPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState("user@example.com");
   const [password, setPassword] = useState("123456");
-  const [error, setError] = useState("");
+  const initialGoogleError = searchParams.get("google_error") || "";
+  const [error, setError] = useState(initialGoogleError);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+
+  React.useEffect(() => {
+    if (!initialGoogleError) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("google_error");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleSubmit(event) {
     event.preventDefault();

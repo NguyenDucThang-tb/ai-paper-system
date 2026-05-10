@@ -1,5 +1,5 @@
-import { Link } from "react-router-dom";
-import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   Brain,
@@ -61,10 +61,12 @@ function NotebookCard({ workspace, index }) {
 }
 
 export default function UserHomePage() {
+  const navigate = useNavigate();
   const [workspaces, setWorkspaces] = useState([]);
   const [query, setQuery] = useState("");
   const [apiNote, setApiNote] = useState("");
   const [creating, setCreating] = useState(false);
+  const creatingRef = useRef(false);
 
   useEffect(() => {
     async function loadNotebooks() {
@@ -87,15 +89,18 @@ export default function UserHomePage() {
   }, [workspaces, query]);
 
   async function handleCreateWorkspace() {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
     setApiNote("");
     try {
       const workspace = await api.createWorkspace("Untitled notebook");
-      window.location.href = `/workspace/${workspace.id}`;
+      navigate(`/workspace/${workspace.id}`);
     } catch (err) {
       setApiNote(err.message || "Không tạo được phiên làm việc.");
     } finally {
       setCreating(false);
+      creatingRef.current = false;
     }
   }
 

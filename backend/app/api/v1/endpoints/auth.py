@@ -38,42 +38,12 @@ from app.core.security import create_access_token, create_refresh_token, get_pas
 from app.core.config import settings
 from app.services.mail_service import generate_code, send_reset_code
 from app.models.password_reset_code import PasswordResetCode
-from app.models.login_event import LoginEvent
 
 
 router = APIRouter()
 
 OTP_RESEND_SECONDS = 60
 OTP_MAX_PER_HOUR = 5
-
-
-def _record_login_event(
-    db: Session,
-    *,
-    user_id: int | None = None,
-    user_email: str,
-    provider: str,
-    device_id: str | None,
-    success: bool,
-    request: Request | None = None,
-    failure_reason: str | None = None,
-) -> None:
-    try:
-        db.add(
-            LoginEvent(
-                user_id=user_id,
-                user_email=user_email.lower().strip(),
-                provider=provider,
-                device_id=device_id,
-                ip_address=(request.client.host if request and request.client else None),
-                user_agent=(request.headers.get("user-agent") if request else None),
-                success=success,
-                failure_reason=failure_reason,
-            )
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
 
 
 def _latest_active_otp_record(db: Session, email: str):
@@ -270,6 +240,16 @@ def build_frontend_callback_url(fragment_params: dict[str, str]) -> str:
     fragment = urlencode(fragment_params)
     return f"{settings.FRONTEND_APP_URL.rstrip('/')}/auth/google/callback#{fragment}"
 
+def resolve_frontend_origin(frontend_origin: str | None) -> str:
+    allowed_prefixes = (
+        "http://127.0.0.1:",
+        "http://localhost:",
+    )
+    candidate = (frontend_origin or "").strip()
+    if any(candidate.startswith(prefix) for prefix in allowed_prefixes):
+        return candidate.rstrip("/")
+    return settings.FRONTEND_APP_URL.rstrip("/")
+
 
 def get_or_create_google_user(db: Session, userinfo: dict):
     email = str(userinfo.get("email", "")).lower().strip()
@@ -304,90 +284,32 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
 # =========================
 @router.post("/login", response_model=TokenResponse)
 def login(
-    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
     # so sánh xem username và password đã có trong database chưa 
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
-        _record_login_event(
-            db,
-            user_email=form_data.username,
-            provider="password",
-            device_id="oauth2-form",
-            success=False,
-            request=request,
-            failure_reason="invalid_credentials",
-        )
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not user.is_active:
-        _record_login_event(
-            db,
-            user_id=user.id,
-            user_email=user.email,
-            provider="password",
-            device_id="oauth2-form",
-            success=False,
-            request=request,
-            failure_reason="user_inactive",
-        )
         raise HTTPException(status_code=403, detail="User account is inactive")
 
-    _record_login_event(
-        db,
-        user_id=user.id,
-        user_email=user.email,
-        provider="password",
-        device_id="oauth2-form",
-        success=True,
-        request=request,
-    )
     return build_token_response(db=db, user=user, device_id="oauth2-form")
 
 
 @router.post("/login/email", response_model=TokenResponse)
 def login_with_email(
     payload: LoginRequest,
-    request: Request,
     db: Session = Depends(get_db),
 ):
     user = authenticate_user(db, str(payload.email), payload.password)
     if not user:
-        _record_login_event(
-            db,
-            user_email=str(payload.email),
-            provider="password",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="invalid_credentials",
-        )
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if not user.is_active:
-        _record_login_event(
-            db,
-            user_id=user.id,
-            user_email=user.email,
-            provider="password",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="user_inactive",
-        )
         raise HTTPException(status_code=403, detail="User account is inactive")
 
-    _record_login_event(
-        db,
-        user_id=user.id,
-        user_email=user.email,
-        provider="password",
-        device_id=payload.device_id,
-        success=True,
-        request=request,
-    )
     return build_token_response(
         db=db,
         user=user,
@@ -398,20 +320,10 @@ def login_with_email(
 @router.post("/login/google", response_model=TokenResponse)
 async def login_with_google(
     payload: GoogleLoginRequest,
-    request: Request,
     db: Session = Depends(get_db),
 ):
     id_token = payload.id_token.strip()
     if not id_token:
-        _record_login_event(
-            db,
-            user_email="unknown-google-user",
-            provider="google",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="missing_id_token",
-        )
         raise HTTPException(status_code=400, detail="Google id_token is required")
 
     try:
@@ -421,27 +333,9 @@ async def login_with_google(
                 params={"id_token": id_token},
             )
     except Exception as exc:
-        _record_login_event(
-            db,
-            user_email="unknown-google-user",
-            provider="google",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="google_verify_error",
-        )
         raise HTTPException(status_code=502, detail=f"Google verification failed: {exc}") from exc
 
     if resp.status_code != 200:
-        _record_login_event(
-            db,
-            user_email="unknown-google-user",
-            provider="google",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="invalid_google_token",
-        )
         raise HTTPException(status_code=401, detail="Google token is invalid")
 
     token_info = resp.json()
@@ -450,39 +344,12 @@ async def login_with_google(
     email_verified = str(token_info.get("email_verified", "")).lower() == "true"
 
     if not aud or aud != (settings.GOOGLE_CLIENT_ID or "").strip():
-        _record_login_event(
-            db,
-            user_email=email or "unknown-google-user",
-            provider="google",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="audience_mismatch",
-        )
         raise HTTPException(status_code=401, detail="Google token audience mismatch")
 
     if not email:
-        _record_login_event(
-            db,
-            user_email="unknown-google-user",
-            provider="google",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="missing_email",
-        )
         raise HTTPException(status_code=401, detail="Google account email is missing")
 
     if not email_verified:
-        _record_login_event(
-            db,
-            user_email=email,
-            provider="google",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="email_not_verified",
-        )
         raise HTTPException(status_code=401, detail="Google email is not verified")
 
     user = get_user_by_email(db, email)
@@ -497,27 +364,8 @@ async def login_with_google(
         )
 
     if not user.is_active:
-        _record_login_event(
-            db,
-            user_id=user.id,
-            user_email=user.email,
-            provider="google",
-            device_id=payload.device_id,
-            success=False,
-            request=request,
-            failure_reason="user_inactive",
-        )
         raise HTTPException(status_code=403, detail="User account is inactive")
 
-    _record_login_event(
-        db,
-        user_id=user.id,
-        user_email=user.email,
-        provider="google",
-        device_id=payload.device_id,
-        success=True,
-        request=request,
-    )
     return build_token_response(
         db=db,
         user=user,
@@ -526,8 +374,13 @@ async def login_with_google(
 
 
 @router.get("/google/login")
-async def start_google_login(request: Request):
+async def start_google_login(
+    request: Request,
+    frontend_origin: str | None = Query(default=None),
+):
     google_client = get_google_oauth_client()
+    request.session.pop("oauth_retry_done", None)
+    request.session["frontend_origin"] = resolve_frontend_origin(frontend_origin)
     return await google_client.authorize_redirect(request, get_google_redirect_uri())
 
 
@@ -542,9 +395,16 @@ async def google_login_callback(
     db: Session = Depends(get_db),
     error: str | None = Query(default=None),
 ):
+    frontend_origin = resolve_frontend_origin(request.session.get("frontend_origin"))
+    request.session.pop("frontend_origin", None)
+
+    def callback_url(params: dict[str, str]) -> str:
+        fragment = urlencode(params)
+        return f"{frontend_origin}/auth/google/callback#{fragment}"
+
     if error:
         return RedirectResponse(
-            url=build_frontend_callback_url({"error": "google_access_denied"}),
+            url=callback_url({"error": "google_access_denied"}),
             status_code=302,
         )
 
@@ -555,52 +415,58 @@ async def google_login_callback(
         if not userinfo:
             userinfo = await google_client.userinfo(token=token)
     except HTTPException as exc:
+        request.session.pop("oauth_retry_done", None)
         return RedirectResponse(
-            url=build_frontend_callback_url({"error": exc.detail.replace(" ", "_").lower()}),
+            url=callback_url(
+                {
+                    "error": exc.detail.replace(" ", "_").lower(),
+                    "error_description": str(exc.detail),
+                }
+            ),
             status_code=302,
         )
-    except Exception:
+    except Exception as exc:
+        error_text = str(exc)
+        if "mismatching_state" in error_text.lower() and not request.session.get("oauth_retry_done"):
+            request.session["oauth_retry_done"] = True
+            retry_origin = resolve_frontend_origin(request.session.get("frontend_origin"))
+            retry_query = urlencode({"frontend_origin": retry_origin})
+            return RedirectResponse(
+                url=f"/api/v1/auth/google/login?{retry_query}",
+                status_code=302,
+            )
+
+        request.session.pop("oauth_retry_done", None)
         return RedirectResponse(
-            url=build_frontend_callback_url({"error": "google_callback_invalid"}),
+            url=callback_url(
+                {
+                    "error": "google_callback_invalid",
+                    "error_description": error_text,
+                }
+            ),
             status_code=302,
         )
 
     email_verified = userinfo.get("email_verified")
     if email_verified is False or str(email_verified).lower() == "false":
+        request.session.pop("oauth_retry_done", None)
         return RedirectResponse(
-            url=build_frontend_callback_url({"error": "google_email_not_verified"}),
+            url=callback_url({"error": "google_email_not_verified"}),
             status_code=302,
         )
 
     user = get_or_create_google_user(db, userinfo)
     if not user.is_active:
-        _record_login_event(
-            db,
-            user_id=user.id,
-            user_email=user.email,
-            provider="google",
-            device_id="google-oauth-redirect",
-            success=False,
-            request=request,
-            failure_reason="user_inactive",
-        )
+        request.session.pop("oauth_retry_done", None)
         return RedirectResponse(
-            url=build_frontend_callback_url({"error": "user_inactive"}),
+            url=callback_url({"error": "user_inactive"}),
             status_code=302,
         )
 
+    request.session.pop("oauth_retry_done", None)
     token_response = build_token_response(db=db, user=user, device_id="google-oauth-redirect")
-    _record_login_event(
-        db,
-        user_id=user.id,
-        user_email=user.email,
-        provider="google",
-        device_id="google-oauth-redirect",
-        success=True,
-        request=request,
-    )
     return RedirectResponse(
-        url=build_frontend_callback_url(
+        url=callback_url(
             {
                 "access_token": token_response["access_token"],
                 "refresh_token": token_response["refresh_token"],

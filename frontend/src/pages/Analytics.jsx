@@ -113,7 +113,7 @@ export default function AnalyticsPage() {
               <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-100 p-6 text-center">
                 <BarChart3 className="mx-auto h-10 w-10 text-zinc-500" />
                 <p className="mt-3 font-medium">Superset Embedded Dashboard</p>
-                <p className="mt-2 text-sm text-zinc-500">Đặt URL dashboard vào biến môi trường khi deploy.</p>
+                <p className="mt-2 text-sm text-zinc-500">Đặt URL dashboard vào biến môi trường local nếu cần tích hợp.</p>
               </div>
               {["publication_year", "authors", "topics"].map((field) => (
                 <div key={field} className="flex items-center justify-between rounded-lg border border-zinc-200 p-3">

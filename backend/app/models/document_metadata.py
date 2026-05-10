@@ -1,6 +1,6 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
 
@@ -8,34 +8,21 @@ from app.db.session import Base
 class DocumentMetadata(Base):
     __tablename__ = "document_metadata"
 
-    id = Column(Integer, primary_key=True, index=True)
-
-    document_id = Column(
-        Integer,
-        ForeignKey("documents.id", ondelete="CASCADE"),
-        unique=True,
-        nullable=False,
-    )
-
-    title = Column(String, nullable=True)
-    abstract = Column(Text, nullable=True)
-    publication_year = Column(Integer, nullable=True)
-    source = Column(String, nullable=True)
-    language = Column(String, default="vi")
-
-    authors = Column(JSON, default=list)
-    keywords = Column(JSON, default=list)
-    topics = Column(JSON, default=list)
-    methods = Column(JSON, default=list)
-
-    doi = Column(String, nullable=True)
-    external_url = Column(String, nullable=True)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    document_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, unique=True)
+    title: Mapped[str | None] = mapped_column(Text)
+    abstract: Mapped[str | None] = mapped_column(Text)
+    publication_year: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str | None] = mapped_column(String(16), default="vi")
+    authors: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    keywords: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    topics: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    methods: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    doi: Mapped[str | None] = mapped_column(String(255))
+    external_url: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     document = relationship("Document", back_populates="metadata_record")
+

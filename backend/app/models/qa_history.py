@@ -1,6 +1,5 @@
-from sqlalchemy import Column, Integer, Text, ForeignKey, DateTime
-from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
 
@@ -8,24 +7,11 @@ from app.db.session import Base
 class QAHistory(Base):
     __tablename__ = "qa_history"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    document_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    sources: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    user_id = Column(
-        Integer,
-        ForeignKey("users.id", ondelete="CASCADE")
-    )
-
-    document_id = Column(
-        Integer,
-        ForeignKey("documents.id", ondelete="CASCADE")
-    )
-
-    question = Column(Text, nullable=False)
-    answer = Column(Text, nullable=False)
-
-    sources = Column(Text, nullable=True)  # JSON string contract for source chunks
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    user = relationship("User")
-    document = relationship("Document")
