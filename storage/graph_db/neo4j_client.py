@@ -9,20 +9,48 @@ Requires:
     pip install neo4j>=5.0.0
 
 Changelog:
-    [fix-1] ensure_schema đưa vào trong class Neo4jClient
-    [fix-2] merge_method / merge_dataset / merge_task thêm ON MATCH SET confidence
-    [fix-3] merge_citation thêm note về title collision khi year=null
-    [fix-4] Thêm run_query() — graph_updater.py dùng qua Neo4jClientProtocol
-    [fix-5] Thêm lookup_method_by_fulltext() và lookup_dataset_by_fulltext()
-            — EntityMerger trong graph_updater.py cần 2 method này
-    [fix-6] merge_author KHÔNG raise ValueError khi paper_id không tìm thấy
-            — raise làm vỡ toàn bộ batch dù các author khác hợp lệ
-            — đổi thành log error + raise Neo4jMergeError (custom) để caller
-              có thể catch riêng nếu cần, BatchGraphBuilder vẫn continue_on_error
-    [fix-7] merge_paper_by_title_year normalize year=None → 0 (sentinel)
-            nhất quán với graph_builder.resolve_paper_id() và schema comment
-    [fix-8] merge_institution đổi raise thành log error + raise Neo4jMergeError
-            nhất quán với fix-6
+    [fix-1]  ensure_schema đưa vào trong class Neo4jClient
+    [fix-2]  merge_method / merge_dataset / merge_task thêm ON MATCH SET confidence
+    [fix-3]  merge_citation thêm note về title collision khi year=null
+    [fix-4]  Thêm run_query() — graph_updater.py dùng qua Neo4jClientProtocol
+    [fix-5]  Thêm lookup_method_by_fulltext() và lookup_dataset_by_fulltext()
+    [fix-6]  merge_author KHÔNG raise ValueError khi paper_id không tìm thấy
+    [fix-7]  merge_paper_by_title_year normalize year=None → 0 (sentinel)
+    [fix-8]  merge_institution đổi raise thành log error + raise Neo4jMergeError
+    [fix-9]  merge_citation normalize cited_year=None → 0 (sentinel)
+    [fix-10] merge_method ON MATCH SET bổ sung category và aliases_text
+             merge_dataset ON MATCH SET bổ sung language và aliases_text
+    [fix-11] ensure_schema bổ sung constraint chunk_qdrant_id
+    [fix-12] merge_metric: measured_on/measured_by dùng "" thay None làm MERGE key
+             tránh lỗi "Cannot merge with null property value"
+    [fix-13] Thêm _escape_lucene() — escape Lucene special chars trước khi
+             truyền vào db.index.fulltext.queryNodes, tránh ParseException
+             khi tên entity chứa [], (), -, /, ... (thiết bị, báo cáo tiếng Việt)
+    [fix-14] merge_paper_by_doi + merge_paper_by_title_year: MERGE theo id thay vì
+             doi / title+year để tương thích với try_claim_paper (đã dùng MERGE id).
+             Tránh ConstraintError khi stub node đã tồn tại theo id.
+             try_claim_paper: đổi MATCH → MERGE để tạo stub nếu paper chưa tồn tại.
+
+    [v2-1]  Thêm merge_concept()          — thay merge_method() + merge_task()
+    [v2-2]  Thêm merge_evidence()         — thay merge_dataset()
+    [v2-3]  Thêm merge_metric()           — node Metric + edge ACHIEVES_METRIC
+    [v2-4]  Thêm merge_finding()          — node Finding + edge HAS_FINDING
+    [v2-5]  Thêm merge_concept_based_on() — thay merge_method_based_on()
+    [v2-6]  Thêm merge_concept_extends()  — edge EXTENDS mới
+    [v2-7]  Thêm merge_paper_supports()   — edge SUPPORTS từ FindingEntity
+    [v2-8]  Thêm merge_paper_contradicts()— edge CONTRADICTS từ FindingEntity
+    [v2-9]  Thêm lookup_concept_by_fulltext()  — thay lookup_method_by_fulltext()
+    [v2-10] Thêm lookup_evidence_by_fulltext() — thay lookup_dataset_by_fulltext()
+    [v2-11] merge_citation thêm param cited_doc_id — graph_builder truyền internal_doc_id
+    [v2-12] ensure_schema thêm constraints + fulltext indexes cho schema mới
+    [v2-13] Giữ nguyên merge_method/dataset/task + lookup cũ để backward compat
+            (legacy code có thể vẫn gọi) — đánh dấu DEPRECATED
+
+    [v2-14] merge_concept_based_on: thêm Cypher cycle guard (*1..3) trước MERGE.
+            Đây là lớp 2 defense — lớp 1 là in-memory DFS trong graph_builder.py.
+            Nếu phát hiện cycle: log WARNING + return, không raise exception,
+            để pipeline tiếp tục xử lý các edge còn lại.
+    [v2-15] merge_concept_extends: tương tự v2-14, thêm Cypher cycle guard cho EXTENDS.
 """
 
 from __future__ import annotations
@@ -42,18 +70,16 @@ logger = logging.getLogger(__name__)
 
 # =============================================================================
 # CUSTOM EXCEPTION  [fix-6]
-# Dùng thay cho ValueError raw để caller có thể catch riêng.
 # =============================================================================
 
 class Neo4jMergeError(Exception):
     """
     Raise khi MERGE thất bại vì node prerequisite không tồn tại.
-    VD: merge_author() không tìm thấy paper_id.
 
     Lý do dùng custom exception thay vì ValueError:
         - Caller (graph_builder, BatchGraphBuilder) có thể catch
           Neo4jMergeError riêng mà không accidentally catch ValueError
-          từ logic khác (index out of range, bad param, ...)
+          từ logic khác.
         - BatchGraphBuilder.continue_on_error sẽ log + continue đúng behavior.
     """
 
@@ -64,13 +90,13 @@ class Neo4jMergeError(Exception):
 
 @dataclass
 class Neo4jConfig:
-    uri: str = "bolt://localhost:7687"
-    username: str = "neo4j"
-    password: str = "password"
-    database: str = "neo4j"
-    max_connection_pool_size: int = 50
-    connection_timeout: float = 30.0
-    max_retry_time: float = 30.0
+    uri:                      str   = "bolt://localhost:7687"
+    username:                 str   = "neo4j"
+    password:                 str   = "password"
+    database:                 str   = "neo4j"
+    max_connection_pool_size: int   = 50
+    connection_timeout:       float = 30.0
+    max_retry_time:           float = 30.0
 
 
 # =============================================================================
@@ -81,18 +107,14 @@ def _normalize_name(text: str) -> str:
     """
     Lowercase + bỏ dấu tiếng Việt + collapse whitespace.
     Dùng cho Institution.name (MERGE key) và Topic.name.
-    VD: "Đại học Quốc gia Hà Nội" → "dai hoc quoc gia ha noi"
     """
-    nfkd = unicodedata.normalize("NFKD", text)
+    nfkd      = unicodedata.normalize("NFKD", text)
     ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
     return " ".join(ascii_str.lower().split())
 
 
 def _to_ascii(text: str) -> str:
-    """
-    Chỉ bỏ dấu, giữ nguyên case — dùng cho name_ascii của Author/Institution
-    (lưu vào full-text index, không phải MERGE key).
-    """
+    """Bỏ dấu, giữ nguyên case — dùng cho name_ascii (full-text index)."""
     nfkd = unicodedata.normalize("NFKD", text)
     return "".join(c for c in nfkd if not unicodedata.combining(c))
 
@@ -101,25 +123,28 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-# =============================================================================
-# CLIENT
-# =============================================================================
+def _escape_lucene(text: str) -> str:
+    """
+    Escape Lucene special characters trước khi truyền vào
+    db.index.fulltext.queryNodes().  [fix-13]
+
+    Lucene special chars: + - & | ! ( ) { } [ ] ^ " ~ * ? : \\ /
+    Nếu không escape, tên entity chứa các ký tự này (VD: "gc-2030 (shimadzu)",
+    "[2]", "qđ attp", "/btnmt") sẽ gây ParseException / TokenMgrError.
+
+    Chỉ escape — không xóa — để vẫn giữ nguyên ngữ nghĩa tìm kiếm.
+    """
+    special = set('+-&|!(){}[]^"~*?:\\/')
+    return "".join(f"\\{c}" if c in special else c for c in text)
+
 
 class Neo4jClient:
     """
     Thread-safe Neo4j client với connection pool.
 
-    Dùng pattern:
-        client = Neo4jClient(config)
-        client.connect()
-        try:
-            client.merge_paper(doc)
-        finally:
-            client.close()
-
-    Hoặc dùng context manager:
+    Dùng context manager:
         with Neo4jClient(config) as client:
-            client.merge_paper(doc)
+            client.merge_paper(doc_dict)
     """
 
     def __init__(self, config: Neo4jConfig):
@@ -164,32 +189,82 @@ class Neo4jClient:
             session.close()
 
     # ------------------------------------------------------------------
-    # Schema setup  [fix-1] đưa vào trong class
+    # Schema setup  [fix-1] [v2-12]
     # ------------------------------------------------------------------
 
     def ensure_schema(self) -> None:
+        """
+        Tạo constraints + indexes cho toàn bộ schema mới.
+        Thứ tự: Constraints → Property Indexes → Fulltext Indexes.
+        Idempotent — an toàn khi chạy lại.
+        """
         constraints = [
-            "CREATE CONSTRAINT paper_doi_unique IF NOT EXISTS FOR (p:Paper) REQUIRE p.doi IS UNIQUE",
+            # ── Paper ──────────────────────────────────────────────────
             "CREATE CONSTRAINT paper_id_unique IF NOT EXISTS FOR (p:Paper) REQUIRE p.id IS UNIQUE",
+            "CREATE CONSTRAINT paper_doi_unique IF NOT EXISTS FOR (p:Paper) REQUIRE p.doi IS UNIQUE",
+
+            # ── Author / Institution / Venue ───────────────────────────
             "CREATE CONSTRAINT author_id_unique IF NOT EXISTS FOR (a:Author) REQUIRE a.id IS UNIQUE",
+            "CREATE CONSTRAINT institution_name_unique IF NOT EXISTS FOR (i:Institution) REQUIRE i.name IS UNIQUE",
+            "CREATE CONSTRAINT venue_name_unique IF NOT EXISTS FOR (v:Venue) REQUIRE v.name IS UNIQUE",
+
+            # ── Topic ──────────────────────────────────────────────────
+            "CREATE CONSTRAINT topic_name_unique IF NOT EXISTS FOR (t:Topic) REQUIRE t.name IS UNIQUE",
+
+            # ── Schema mới [v2-12] ─────────────────────────────────────
+            "CREATE CONSTRAINT concept_name_unique IF NOT EXISTS FOR (c:Concept) REQUIRE c.name IS UNIQUE",
+            "CREATE CONSTRAINT evidence_name_unique IF NOT EXISTS FOR (e:Evidence) REQUIRE e.name IS UNIQUE",
+            # Metric không có global unique key vì cùng tên metric có thể đo trên dataset khác nhau.
+            # MERGE key = (name, measured_on, measured_by) — enforce ở tầng Python.
+
+            # ── Chunk [fix-11] ─────────────────────────────────────────
+            "CREATE CONSTRAINT chunk_qdrant_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.qdrant_id IS UNIQUE",
+
+            # ── Legacy — giữ để backward compat [v2-13] ────────────────
             "CREATE CONSTRAINT method_name_unique IF NOT EXISTS FOR (m:Method) REQUIRE m.name IS UNIQUE",
             "CREATE CONSTRAINT dataset_name_unique IF NOT EXISTS FOR (d:Dataset) REQUIRE d.name IS UNIQUE",
-            "CREATE CONSTRAINT task_name_unique IF NOT EXISTS FOR (t:Task) REQUIRE t.name IS UNIQUE",
-            "CREATE CONSTRAINT topic_name_unique IF NOT EXISTS FOR (t:Topic) REQUIRE t.name IS UNIQUE",
-            "CREATE CONSTRAINT venue_name_unique IF NOT EXISTS FOR (v:Venue) REQUIRE v.name IS UNIQUE",
-            "CREATE CONSTRAINT institution_name_unique IF NOT EXISTS FOR (i:Institution) REQUIRE i.name IS UNIQUE",
+            "CREATE CONSTRAINT task_name_unique IF NOT EXISTS FOR (tk:Task) REQUIRE tk.name IS UNIQUE",
         ]
         for cypher in constraints:
             self.execute_write(cypher)
         logger.info("ensure_schema: constraints OK")
 
-        # Fulltext indexes — cần cho lookup_author/method/dataset_by_fulltext
+        property_indexes = [
+            # Paper
+            "CREATE INDEX paper_year IF NOT EXISTS FOR (p:Paper) ON (p.year)",
+            "CREATE INDEX paper_language IF NOT EXISTS FOR (p:Paper) ON (p.language)",
+            "CREATE INDEX paper_status IF NOT EXISTS FOR (p:Paper) ON (p.processing_status)",
+            "CREATE INDEX paper_title_year IF NOT EXISTS FOR (p:Paper) ON (p.title, p.year)",
+            # Author / Institution
+            "CREATE INDEX author_affiliation IF NOT EXISTS FOR (a:Author) ON (a.affiliation)",
+            "CREATE INDEX institution_country IF NOT EXISTS FOR (i:Institution) ON (i.country)",
+            # Schema mới [v2-12]
+            "CREATE INDEX concept_category IF NOT EXISTS FOR (c:Concept) ON (c.category)",
+            "CREATE INDEX concept_domain IF NOT EXISTS FOR (c:Concept) ON (c.domain)",
+            "CREATE INDEX evidence_type IF NOT EXISTS FOR (e:Evidence) ON (e.evidence_type)",
+            "CREATE INDEX evidence_language IF NOT EXISTS FOR (e:Evidence) ON (e.language)",
+            "CREATE INDEX finding_type IF NOT EXISTS FOR (f:Finding) ON (f.finding_type)",
+            # SIMILAR_TO
+            "CREATE INDEX similar_to_score IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() ON (r.score)",
+            # Legacy
+            "CREATE INDEX method_category IF NOT EXISTS FOR (m:Method) ON (m.category)",
+            "CREATE INDEX dataset_language IF NOT EXISTS FOR (d:Dataset) ON (d.language)",
+        ]
+        for cypher in property_indexes:
+            self.execute_write(cypher)
+        logger.info("ensure_schema: property indexes OK")
+
         fulltext_indexes = [
+            # Author / Paper / Institution
             "CREATE FULLTEXT INDEX author_ft IF NOT EXISTS FOR (a:Author) ON EACH [a.name, a.name_ascii]",
             "CREATE FULLTEXT INDEX paper_title_ft IF NOT EXISTS FOR (p:Paper) ON EACH [p.title]",
+            "CREATE FULLTEXT INDEX institution_ft IF NOT EXISTS FOR (i:Institution) ON EACH [i.name, i.name_ascii]",
+            # Schema mới [v2-12]
+            "CREATE FULLTEXT INDEX concept_ft IF NOT EXISTS FOR (c:Concept) ON EACH [c.name, c.aliases_text]",
+            "CREATE FULLTEXT INDEX evidence_ft IF NOT EXISTS FOR (e:Evidence) ON EACH [e.name, e.aliases_text]",
+            # Legacy [v2-13]
             "CREATE FULLTEXT INDEX method_ft IF NOT EXISTS FOR (m:Method) ON EACH [m.name, m.aliases_text]",
             "CREATE FULLTEXT INDEX dataset_ft IF NOT EXISTS FOR (d:Dataset) ON EACH [d.name, d.aliases_text]",
-            "CREATE FULLTEXT INDEX institution_ft IF NOT EXISTS FOR (i:Institution) ON EACH [i.name, i.name_ascii]",
         ]
         for cypher in fulltext_indexes:
             self.execute_write(cypher)
@@ -197,9 +272,6 @@ class Neo4jClient:
 
     # ------------------------------------------------------------------
     # Low-level execute helpers
-    # Retry TransientError được xử lý tự động bởi Neo4j driver
-    # thông qua session.execute_write (managed transaction).
-    # KHÔNG dùng session.run() trực tiếp — sẽ mất retry.
     # ------------------------------------------------------------------
 
     def execute_write(self, query: str, params: dict[str, Any] | None = None) -> list[dict]:
@@ -217,52 +289,67 @@ class Neo4jClient:
     def run_query(self, cypher: str, params: dict | None = None) -> list[dict]:
         """
         Generic query method — dùng bởi graph_updater.py qua Neo4jClientProtocol.  [fix-4]
-
         Dùng execute_write vì graph_updater chủ yếu SET/MERGE.
-        Nếu cần read-only (MATCH + RETURN), vẫn an toàn — Neo4j driver
-        không phân biệt write/read transaction với Cypher read-only.
-
-        NOTE: Nếu sau này cần tối ưu read performance, có thể check
-        cypher.strip().upper().startswith("MATCH") để route sang execute_read.
         """
         return self.execute_write(cypher, params)
 
-    # ------------------------------------------------------------------
-    # SECTION 6 MERGE TEMPLATES — Giai đoạn 1
-    # ------------------------------------------------------------------
+    def try_claim_paper(self, paper_id: str) -> bool:
+        """
+        Atomic claim paper để tránh 2 worker cùng xử lý 1 paper.
+        [fix-14] Dùng MERGE thay MATCH — tạo stub nếu paper chưa tồn tại trong DB.
+                 MATCH cũ sẽ fail khi DB trống, khiến mọi paper bị skip.
+        """
+        query = """
+        MERGE (p:Paper {id: $id})
+        ON CREATE SET
+            p.processing_status = 'processing',
+            p.created_at        = datetime()
+        ON MATCH SET
+            p.processing_status = CASE
+                WHEN p.processing_status IN ['parsed', 'stub']
+                THEN 'processing'
+                ELSE p.processing_status
+            END
+        WITH p
+        WHERE p.processing_status = 'processing'
+        RETURN p.id AS claimed
+        """
+        result = self.execute_write(query, {"id": paper_id})
+        return bool(result)
 
-    # ── Paper ──────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # PAPER
+    # ------------------------------------------------------------------
 
     def merge_paper_by_doi(
         self,
         *,
-        paper_id: str,
-        doi: str,
-        title: str,
-        year: Optional[int],
-        abstract: str = "",
-        language: str = "vi",
-        source_file: str = "",
-        source_type: str = "",
+        paper_id:       str,
+        doi:            str,
+        title:          str,
+        year:           Optional[int],
+        abstract:       str           = "",
+        language:       str           = "vi",
+        domain:         Optional[str] = None,
+        source_file:    str           = "",
+        source_type:    str           = "",
         citation_count: Optional[int] = None,
-        chunk_ids: list[str] | None = None,
-        page_count: Optional[int] = None,
+        chunk_ids:      list[str] | None = None,
+        page_count:     Optional[int] = None,
     ) -> None:
-        """
-        MERGE paper theo doi.
-        Schema cảnh báo: KHÔNG BAO GIỜ gọi hàm này khi doi = None / "".
-        Kiểm tra doi ở tầng gọi (graph_builder.py).
-        """
         assert doi, "merge_paper_by_doi: doi không được rỗng"
-
+        # [fix-14] MERGE theo id thay vì doi — tương thích với try_claim_paper.
+        # try_claim_paper tạo stub theo id, nếu merge_paper_by_doi dùng MERGE doi
+        # sẽ tạo node thứ 2 với cùng id → ConstraintError paper_id_unique.
         query = """
-        MERGE (p:Paper {doi: $doi})
+        MERGE (p:Paper {id: $id})
         ON CREATE SET
-            p.id                = $id,
+            p.doi               = $doi,
             p.title             = $title,
             p.year              = $year,
             p.abstract          = $abstract,
             p.language          = $language,
+            p.domain            = $domain,
             p.source_file       = $source_file,
             p.source_type       = $source_type,
             p.page_count        = $page_count,
@@ -271,16 +358,27 @@ class Neo4jClient:
             p.processing_status = 'parsed',
             p.created_at        = datetime()
         ON MATCH SET
+            p.doi               = $doi,
+            p.title             = $title,
+            p.year              = $year,
+            p.abstract          = CASE WHEN $abstract <> '' THEN $abstract ELSE p.abstract END,
+            p.language          = $language,
+            p.domain            = CASE WHEN $domain IS NOT NULL THEN $domain ELSE p.domain END,
+            p.source_file       = $source_file,
+            p.source_type       = $source_type,
+            p.page_count        = $page_count,
+            p.citation_count    = $citation_count,
             p.chunk_ids         = $chunk_ids,
             p.processing_status = 'parsed'
         """
         self.execute_write(query, {
-            "doi":            doi,
             "id":             paper_id,
+            "doi":            doi,
             "title":          title,
             "year":           year,
             "abstract":       abstract,
             "language":       language,
+            "domain":         domain,
             "source_file":    source_file,
             "source_type":    source_type,
             "page_count":     page_count,
@@ -292,36 +390,29 @@ class Neo4jClient:
     def merge_paper_by_title_year(
         self,
         *,
-        paper_id: str,
-        title: str,
-        year: Optional[int],
-        language: str = "vi",
-        source_file: str = "",
-        source_type: str = "",
-        chunk_ids: list[str] | None = None,
-        page_count: Optional[int] = None,
+        paper_id:    str,
+        title:       str,
+        year:        Optional[int],
+        language:    str           = "vi",
+        domain:      Optional[str] = None,
+        source_file: str           = "",
+        source_type: str           = "",
+        chunk_ids:   list[str] | None = None,
+        page_count:  Optional[int] = None,
     ) -> None:
         """
         Fallback MERGE khi doi = None.
-        MERGE key: (title, year).
-
-        [fix-7] year=None → normalize thành 0 (sentinel) trước khi MERGE.
-        Lý do: Neo4j MERGE (p {title: "X", year: null}) sẽ match tất cả paper
-        không rõ năm có cùng title → collision silent.
-        Dùng 0 làm sentinel để tránh collision, nhất quán với resolve_paper_id().
-
-        CẢNH BÁO: 2 paper khác nhau cùng title và không rõ năm sẽ bị merge
-        thành 1 node. graph_builder.py nên check title length >= 10 trước khi
-        gọi hàm này.
+        [fix-7]  year=None → normalize thành 0 (sentinel).
+        [fix-14] MERGE theo id thay vì title+year — tương thích với try_claim_paper.
         """
-        # [fix-7] normalize year sentinel
         year_safe = year if year is not None else 0
-
         query = """
-        MERGE (p:Paper {title: $title, year: $year})
+        MERGE (p:Paper {id: $id})
         ON CREATE SET
-            p.id                = $id,
+            p.title             = $title,
+            p.year              = $year,
             p.language          = $language,
+            p.domain            = $domain,
             p.source_file       = $source_file,
             p.source_type       = $source_type,
             p.page_count        = $page_count,
@@ -329,17 +420,22 @@ class Neo4jClient:
             p.processing_status = 'parsed',
             p.created_at        = datetime()
         ON MATCH SET
+            p.title             = $title,
+            p.year              = $year,
+            p.language          = $language,
+            p.domain            = CASE WHEN $domain IS NOT NULL THEN $domain ELSE p.domain END,
             p.chunk_ids         = $chunk_ids,
             p.processing_status = CASE
-                WHEN p.processing_status = 'stub' THEN 'parsed'
+                WHEN p.processing_status IN ['stub', 'processing'] THEN 'parsed'
                 ELSE p.processing_status
             END
         """
         self.execute_write(query, {
-            "title":       title,
-            "year":        year_safe,  # [fix-7]
             "id":          paper_id,
+            "title":       title,
+            "year":        year_safe,
             "language":    language,
+            "domain":      domain,
             "source_file": source_file,
             "source_type": source_type,
             "page_count":  page_count,
@@ -350,62 +446,54 @@ class Neo4jClient:
     def merge_paper(self, doc_dict: dict) -> None:
         """
         Entry point cho graph_builder.py.
-        Tự động chọn strategy doi vs title+year theo schema rule.
+        Tự động chọn strategy doi vs title+year.
 
-        doc_dict keys tương ứng field của UnifiedDocument:
-            id, title, year, doi, abstract, language,
-            source_file, source_type, page_count,
-            citation_count, chunk_ids
+        doc_dict keys: id, title, year, doi, abstract, language, domain,
+                       source_file, source_type, page_count, citation_count, chunk_ids
         """
         doi = doc_dict.get("doi") or ""
         if doi.strip():
             self.merge_paper_by_doi(
-                paper_id=doc_dict["id"],
-                doi=doi.strip(),
-                title=doc_dict.get("title", "Unknown"),
-                year=doc_dict.get("year"),
-                abstract=doc_dict.get("abstract", ""),
-                language=doc_dict.get("language", "vi"),
-                source_file=doc_dict.get("source_file", ""),
-                source_type=doc_dict.get("source_type", ""),
-                citation_count=doc_dict.get("citation_count"),
-                chunk_ids=doc_dict.get("chunk_ids", []),
-                page_count=doc_dict.get("page_count"),
+                paper_id=       doc_dict["id"],
+                doi=            doi.strip(),
+                title=          doc_dict.get("title", "Unknown"),
+                year=           doc_dict.get("year"),
+                abstract=       doc_dict.get("abstract", ""),
+                language=       doc_dict.get("language", "vi"),
+                domain=         doc_dict.get("domain"),
+                source_file=    doc_dict.get("source_file", ""),
+                source_type=    doc_dict.get("source_type", ""),
+                citation_count= doc_dict.get("citation_count"),
+                chunk_ids=      doc_dict.get("chunk_ids", []),
+                page_count=     doc_dict.get("page_count"),
             )
         else:
             self.merge_paper_by_title_year(
-                paper_id=doc_dict["id"],
-                title=doc_dict.get("title", "Unknown"),
-                year=doc_dict.get("year"),   # merge_paper_by_title_year tự normalize
-                language=doc_dict.get("language", "vi"),
-                source_file=doc_dict.get("source_file", ""),
-                source_type=doc_dict.get("source_type", ""),
-                chunk_ids=doc_dict.get("chunk_ids", []),
-                page_count=doc_dict.get("page_count"),
+                paper_id=    doc_dict["id"],
+                title=       doc_dict.get("title", "Unknown"),
+                year=        doc_dict.get("year"),
+                language=    doc_dict.get("language", "vi"),
+                domain=      doc_dict.get("domain"),
+                source_file= doc_dict.get("source_file", ""),
+                source_type= doc_dict.get("source_type", ""),
+                chunk_ids=   doc_dict.get("chunk_ids", []),
+                page_count=  doc_dict.get("page_count"),
             )
 
-    # ── Citation stub ───────────────────────────────────────────────────
-    # NOTE: merge_citation_stub() đã bị xoá sau fix Lỗi 2.
-    # Stub MERGE và CITES edge hiện được gộp vào 1 transaction trong merge_citation()
-    # để tránh race condition giữa 2 execute_write liên tiếp.
-
-    # ── Author ──────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # AUTHOR
+    # ------------------------------------------------------------------
 
     def lookup_author_by_fulltext(
         self,
-        name: str,
+        name:        str,
         affiliation: Optional[str] = None,
-        threshold: float = 0.8,
+        threshold:   float         = 0.8,
     ) -> Optional[str]:
-        """
-        Full-text search author trước khi CREATE.
-        Trả về author_id nếu tìm thấy match đủ confidence, None nếu không.
-        Schema note: dùng index author_ft trên (name, name_ascii).
-        """
-        query_str = name.strip()
+        # [fix-13] escape Lucene special chars
+        query_str = _escape_lucene(name.strip())
         if affiliation and affiliation.strip():
-            query_str = f"{query_str} {affiliation.strip()}"
-
+            query_str = f"{query_str} {_escape_lucene(affiliation.strip())}"
         query = """
         CALL db.index.fulltext.queryNodes('author_ft', $query_str)
         YIELD node, score
@@ -414,36 +502,26 @@ class Neo4jClient:
         ORDER BY score DESC
         LIMIT 1
         """
-        results = self.execute_read(query, {
-            "query_str": query_str,
-            "threshold": threshold,
-        })
+        results = self.execute_read(query, {"query_str": query_str, "threshold": threshold})
         if results:
-            logger.debug(
-                "lookup_author_by_fulltext: found '%s' score=%.2f",
-                results[0]["name"], results[0]["score"]
-            )
+            logger.debug("lookup_author_by_fulltext: found '%s' score=%.2f",
+                         results[0]["name"], results[0]["score"])
             return results[0]["id"]
         return None
 
     def merge_author(
         self,
         *,
-        author_id: str,
-        name: str,
-        paper_id: str,
-        order: int,
-        email: Optional[str] = None,
+        author_id:   str,
+        name:        str,
+        paper_id:    str,
+        order:       int,
+        email:       Optional[str] = None,
         affiliation: Optional[str] = None,
     ) -> None:
         """
-        MERGE Author bằng UUID id (không unique theo name).
-        Tạo edge (Author)-[:WROTE {order}]->(Paper).
-
-        [fix-6] KHÔNG raise ValueError khi paper_id không tìm thấy.
-        Lý do: raise làm vỡ toàn bộ batch khi build_phase1() loop qua nhiều author.
-        Thay bằng raise Neo4jMergeError để caller (graph_builder) có thể catch
-        riêng nếu cần — BatchGraphBuilder.continue_on_error sẽ xử lý đúng.
+        MERGE Author + edge (Author)-[:WROTE {order}]->(Paper).
+        [fix-6] raise Neo4jMergeError thay vì ValueError khi paper_id không tìm thấy.
         """
         name_ascii = _to_ascii(name)
         query = """
@@ -468,10 +546,8 @@ class Neo4jClient:
             "order":       order,
         })
         if not result:
-            # [fix-6] log error + raise Neo4jMergeError thay vì ValueError
             logger.error(
-                "merge_author: paper_id='%s' không tồn tại trong Neo4j. "
-                "Đảm bảo merge_paper() đã chạy trước. Author '%s' không được link.",
+                "merge_author: paper_id='%s' không tồn tại. Author '%s' không được link.",
                 paper_id, name,
             )
             raise Neo4jMergeError(
@@ -479,24 +555,21 @@ class Neo4jClient:
                 f"author '{name}' không được link vào graph."
             )
 
-    # ── Institution ─────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # INSTITUTION
+    # ------------------------------------------------------------------
 
     def merge_institution(
         self,
         *,
-        author_id: str,
+        author_id:    str,
         display_name: str,
-        country: Optional[str] = None,
-        inst_type: Optional[str] = None,
+        country:      Optional[str] = None,
+        inst_type:    Optional[str] = None,
     ) -> None:
-        """
-        MERGE Institution theo name normalized (lowercase + bỏ dấu).
-        Tạo edge (Author)-[:AFFILIATED_WITH]->(Institution).
-
-        [fix-8] Đổi raise ValueError → raise Neo4jMergeError nhất quán với fix-6.
-        """
+        """[fix-8] raise Neo4jMergeError thay vì ValueError."""
         name_normalized = _normalize_name(display_name)
-        name_ascii = _to_ascii(display_name)
+        name_ascii      = _to_ascii(display_name)
         query = """
         MERGE (i:Institution {name: $name_normalized})
         ON CREATE SET
@@ -519,10 +592,8 @@ class Neo4jClient:
             "author_id":       author_id,
         })
         if not result:
-            # [fix-8] nhất quán với fix-6
             logger.error(
-                "merge_institution: author_id='%s' không tồn tại trong Neo4j. "
-                "Đảm bảo merge_author() đã chạy trước. Institution '%s' không được link.",
+                "merge_institution: author_id='%s' không tồn tại. Institution '%s' không link.",
                 author_id, display_name,
             )
             raise Neo4jMergeError(
@@ -530,23 +601,21 @@ class Neo4jClient:
                 f"institution '{display_name}' không được link."
             )
 
-    # ── Venue ───────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # VENUE
+    # ------------------------------------------------------------------
 
     def merge_venue(
         self,
         *,
-        paper_id: str,
+        paper_id:   str,
         venue_name: str,
-        venue_type: str = "journal",
-        publisher: Optional[str] = None,
-        volume: Optional[str] = None,
-        issue: Optional[str] = None,
-        pages: Optional[str] = None,
+        venue_type: str           = "journal",
+        publisher:  Optional[str] = None,
+        volume:     Optional[str] = None,
+        issue:      Optional[str] = None,
+        pages:      Optional[str] = None,
     ) -> None:
-        """
-        MERGE Venue theo name normalized.
-        Tạo edge (Paper)-[:PUBLISHED_AT]->(Venue) với volume/issue/pages trên edge.
-        """
         name_normalized = _normalize_name(venue_name)
         query = """
         MERGE (v:Venue {name: $name_normalized})
@@ -557,14 +626,8 @@ class Neo4jClient:
         WITH v
         MATCH (p:Paper {id: $paper_id})
         MERGE (p)-[r:PUBLISHED_AT]->(v)
-        ON CREATE SET
-            r.volume = $volume,
-            r.issue  = $issue,
-            r.pages  = $pages
-        ON MATCH SET
-            r.volume = $volume,
-            r.issue  = $issue,
-            r.pages  = $pages
+        ON CREATE SET r.volume = $volume, r.issue = $issue, r.pages = $pages
+        ON MATCH SET  r.volume = $volume, r.issue = $issue, r.pages = $pages
         """
         self.execute_write(query, {
             "name_normalized": name_normalized,
@@ -577,34 +640,23 @@ class Neo4jClient:
         })
 
     # ------------------------------------------------------------------
-    # SECTION 6 MERGE TEMPLATES — Giai đoạn 2
+    # TOPIC
     # ------------------------------------------------------------------
-
-    # ── Topic ───────────────────────────────────────────────────────────
 
     def merge_topics(
         self,
         *,
         paper_id: str,
-        topics: list[str],
-        source: str = "keyword",
+        topics:   list[str],
+        source:   str = "keyword",
     ) -> None:
-        """
-        Batch MERGE Topic từ keywords list.
-        source: "keyword" | "llm_extracted"
-
-        Verify paper tồn tại trước khi UNWIND batch để tránh silent fail.
-        """
         normalized = [t.lower().strip() for t in topics if t.strip()]
         if not normalized:
             return
-
         if not self.get_paper_by_id(paper_id):
             raise Neo4jMergeError(
-                f"merge_topics: paper_id '{paper_id}' không tìm thấy. "
-                "Đảm bảo merge_paper() đã chạy trước."
+                f"merge_topics: paper_id '{paper_id}' không tìm thấy."
             )
-
         query = """
         UNWIND $topics AS topic_name
         MERGE (t:Topic {name: topic_name})
@@ -615,202 +667,142 @@ class Neo4jClient:
         ON CREATE SET r.source = $source
         ON MATCH SET  r.source = $source
         """
-        self.execute_write(query, {
-            "topics":   normalized,
-            "paper_id": paper_id,
-            "source":   source,
-        })
+        self.execute_write(query, {"topics": normalized, "paper_id": paper_id, "source": source})
 
-    # ── Method ──────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # CONCEPT  [v2-1]
+    # ------------------------------------------------------------------
 
-    def merge_method(
+    def merge_concept(
         self,
         *,
-        paper_id: str,
-        method_name: str,
-        category: Optional[str] = None,
-        aliases: list[str] | None = None,
-        source_section: str = "method",
-        confidence: float = 1.0,
-        evidence: str = "",
+        paper_id:       str,
+        concept_name:   str,
+        category:       str           = "concept",
+        aliases:        list[str] | None = None,
+        domain:         Optional[str] = None,
+        source_section: str           = "method",
+        confidence:     float         = 1.0,
+        evidence:       str           = "",
     ) -> None:
-        """
-        MERGE Method + edge (Paper)-[:USES_METHOD]->(Method).
-        aliases được lưu dạng string "alias1|alias2" (không phải list).
-        ON MATCH SET giữ confidence cao nhất khi pipeline chạy lại.  [fix-2]
-        """
-        name_canonical = method_name.lower().strip()
-        aliases_text = "|".join(a.lower().strip() for a in (aliases or []))
+        name_canonical = concept_name.lower().strip()
+        aliases_text   = "|".join(a.lower().strip() for a in (aliases or []) if a.strip())
         query = """
-        MERGE (m:Method {name: $method_name})
+        MERGE (c:Concept {name: $concept_name})
         ON CREATE SET
-            m.id           = randomUUID(),
-            m.category     = $category,
-            m.aliases_text = $aliases_text
-        WITH m
+            c.id           = randomUUID(),
+            c.category     = $category,
+            c.domain       = $domain,
+            c.aliases_text = $aliases_text
+        ON MATCH SET
+            c.category     = CASE
+                WHEN $category IS NOT NULL AND $category <> 'concept'
+                THEN $category ELSE c.category END,
+            c.domain       = CASE
+                WHEN $domain IS NOT NULL THEN $domain ELSE c.domain END,
+            c.aliases_text = CASE
+                WHEN $aliases_text IS NOT NULL AND $aliases_text <> ''
+                    AND (c.aliases_text IS NULL OR c.aliases_text = '')
+                THEN $aliases_text
+                WHEN $aliases_text IS NOT NULL AND $aliases_text <> ''
+                    AND NOT $aliases_text IN split(c.aliases_text, '|')
+                THEN c.aliases_text + '|' + $aliases_text
+                ELSE c.aliases_text
+            END
+        WITH c
         MATCH (p:Paper {id: $paper_id})
-        MERGE (p)-[r:USES_METHOD]->(m)
+        MERGE (p)-[r:USES_CONCEPT]->(c)
         ON CREATE SET
+            r.category       = $category,
             r.source_section = $source_section,
             r.confidence     = $confidence,
             r.evidence       = $evidence
         ON MATCH SET
-            r.confidence = CASE WHEN $confidence > r.confidence
-                           THEN $confidence ELSE r.confidence END,
-            r.evidence   = CASE WHEN $confidence > r.confidence
-                           THEN $evidence ELSE r.evidence END
+            r.category       = $category,
+            r.confidence     = CASE WHEN $confidence > r.confidence
+                               THEN $confidence ELSE r.confidence END,
+            r.evidence       = CASE WHEN $confidence > r.confidence
+                               THEN $evidence ELSE r.evidence END
         """
         self.execute_write(query, {
-            "method_name":    name_canonical,
+            "concept_name":   name_canonical,
             "category":       category,
+            "domain":         domain,
             "aliases_text":   aliases_text,
             "paper_id":       paper_id,
             "source_section": source_section,
             "confidence":     confidence,
             "evidence":       evidence[:200],
         })
+        logger.debug("merge_concept: '%s' category=%s paper=%s", name_canonical, category, paper_id)
 
-    def lookup_method_by_fulltext(
+    def lookup_concept_by_fulltext(
         self,
-        name: str,
+        name:      str,
         threshold: float = 0.75,
     ) -> Optional[str]:
         """
-        Full-text search Method node theo name và aliases_text.  [fix-5]
-        Trả về name canonical của node nếu tìm thấy, None nếu không.
-
-        Dùng bởi EntityMerger trong graph_updater.py để detect duplicate
-        trước khi gọi apoc.refactor.mergeNodes.
-
-        Schema note: dùng index method_ft trên (name, aliases_text).
-        Trả về name (không phải id) vì MERGE_METHOD_CYPHER trong graph_updater
-        dùng MATCH (m:Method {name: $name}).
+        Full-text search Concept node theo name và aliases_text.  [v2-9]
+        [fix-13] escape Lucene special chars trước khi query.
         """
         query = """
-        CALL db.index.fulltext.queryNodes('method_ft', $query_str)
+        CALL db.index.fulltext.queryNodes('concept_ft', $query_str)
         YIELD node, score
         WHERE score >= $threshold
         RETURN node.name AS name, score
         ORDER BY score DESC
         LIMIT 1
         """
-        results = self.execute_read(query, {
-            "query_str": name.strip(),
-            "threshold": threshold,
-        })
+        query_str = _escape_lucene(name.strip())
+        results = self.execute_read(query, {"query_str": query_str, "threshold": threshold})
         if results:
-            logger.debug(
-                "lookup_method_by_fulltext: found '%s' score=%.2f",
-                results[0]["name"], results[0]["score"],
-            )
+            logger.debug("lookup_concept_by_fulltext: found '%s' score=%.2f",
+                         results[0]["name"], results[0]["score"])
             return results[0]["name"]
         return None
 
-    # ── Dataset ─────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # EVIDENCE  [v2-2]
+    # ------------------------------------------------------------------
 
-    def merge_dataset(
+    def merge_evidence(
         self,
         *,
-        paper_id: str,
-        dataset_name: str,
-        dataset_language: Optional[str] = None,
-        aliases: list[str] | None = None,
-        source_section: str = "experiment",
-        confidence: float = 1.0,
-        evidence: str = "",
-        metric: Optional[str] = None,
+        paper_id:       str,
+        evidence_name:  str,
+        evidence_type:  str           = "dataset",
+        language:       Optional[str] = None,
+        aliases:        list[str] | None = None,
+        source_section: str           = "experiment",
+        confidence:     float         = 1.0,
+        evidence:       str           = "",
     ) -> None:
-        """
-        MERGE Dataset + edge (Paper)-[:EVALUATES_ON]->(Dataset).
-        ON MATCH SET giữ confidence cao nhất khi pipeline chạy lại.  [fix-2]
-        """
-        name_canonical = dataset_name.lower().strip()
-        aliases_text = "|".join(a.lower().strip() for a in (aliases or []))
+        name_canonical = evidence_name.lower().strip()
+        aliases_text   = "|".join(a.lower().strip() for a in (aliases or []) if a.strip())
         query = """
-        MERGE (d:Dataset {name: $dataset_name})
+        MERGE (e:Evidence {name: $evidence_name})
         ON CREATE SET
-            d.id           = randomUUID(),
-            d.language     = $dataset_language,
-            d.aliases_text = $aliases_text
-        WITH d
-        MATCH (p:Paper {id: $paper_id})
-        MERGE (p)-[r:EVALUATES_ON]->(d)
-        ON CREATE SET
-            r.source_section = $source_section,
-            r.confidence     = $confidence,
-            r.evidence       = $evidence,
-            r.metric         = $metric
+            e.id            = randomUUID(),
+            e.evidence_type = $evidence_type,
+            e.language      = $language,
+            e.aliases_text  = $aliases_text
         ON MATCH SET
-            r.confidence = CASE WHEN $confidence > r.confidence
-                           THEN $confidence ELSE r.confidence END,
-            r.evidence   = CASE WHEN $confidence > r.confidence
-                           THEN $evidence ELSE r.evidence END
-        """
-        self.execute_write(query, {
-            "dataset_name":     name_canonical,
-            "dataset_language": dataset_language,
-            "aliases_text":     aliases_text,
-            "paper_id":         paper_id,
-            "source_section":   source_section,
-            "confidence":       confidence,
-            "evidence":         evidence[:200],
-            "metric":           metric,
-        })
-
-    def lookup_dataset_by_fulltext(
-        self,
-        name: str,
-        threshold: float = 0.75,
-    ) -> Optional[str]:
-        """
-        Full-text search Dataset node theo name và aliases_text.  [fix-5]
-        Trả về name canonical của node nếu tìm thấy, None nếu không.
-
-        Tương tự lookup_method_by_fulltext — xem docstring đó để biết thêm.
-        Schema note: dùng index dataset_ft trên (name, aliases_text).
-        """
-        query = """
-        CALL db.index.fulltext.queryNodes('dataset_ft', $query_str)
-        YIELD node, score
-        WHERE score >= $threshold
-        RETURN node.name AS name, score
-        ORDER BY score DESC
-        LIMIT 1
-        """
-        results = self.execute_read(query, {
-            "query_str": name.strip(),
-            "threshold": threshold,
-        })
-        if results:
-            logger.debug(
-                "lookup_dataset_by_fulltext: found '%s' score=%.2f",
-                results[0]["name"], results[0]["score"],
-            )
-            return results[0]["name"]
-        return None
-
-    # ── Task ────────────────────────────────────────────────────────────
-
-    def merge_task(
-        self,
-        *,
-        paper_id: str,
-        task_name: str,
-        source_section: str = "abstract",
-        confidence: float = 1.0,
-        evidence: str = "",
-    ) -> None:
-        """
-        MERGE Task + edge (Paper)-[:ADDRESSES_TASK]->(Task).
-        ON MATCH SET giữ confidence cao nhất khi pipeline chạy lại.  [fix-2]
-        """
-        name_canonical = task_name.lower().strip()
-        query = """
-        MERGE (tk:Task {name: $task_name})
-        ON CREATE SET tk.id = randomUUID()
-        WITH tk
+            e.evidence_type = CASE
+                WHEN $evidence_type IS NOT NULL THEN $evidence_type ELSE e.evidence_type END,
+            e.language      = CASE
+                WHEN $language IS NOT NULL THEN $language ELSE e.language END,
+            e.aliases_text  = CASE
+                WHEN $aliases_text IS NOT NULL AND $aliases_text <> ''
+                    AND (e.aliases_text IS NULL OR e.aliases_text = '')
+                THEN $aliases_text
+                WHEN $aliases_text IS NOT NULL AND $aliases_text <> ''
+                    AND NOT $aliases_text IN split(e.aliases_text, '|')
+                THEN e.aliases_text + '|' + $aliases_text
+                ELSE e.aliases_text
+            END
+        WITH e
         MATCH (p:Paper {id: $paper_id})
-        MERGE (p)-[r:ADDRESSES_TASK]->(tk)
+        MERGE (p)-[r:EVALUATES_ON]->(e)
         ON CREATE SET
             r.source_section = $source_section,
             r.confidence     = $confidence,
@@ -822,78 +814,392 @@ class Neo4jClient:
                            THEN $evidence ELSE r.evidence END
         """
         self.execute_write(query, {
-            "task_name":      name_canonical,
+            "evidence_name":  name_canonical,
+            "evidence_type":  evidence_type,
+            "language":       language,
+            "aliases_text":   aliases_text,
             "paper_id":       paper_id,
             "source_section": source_section,
             "confidence":     confidence,
             "evidence":       evidence[:200],
         })
+        logger.debug("merge_evidence: '%s' type=%s paper=%s", name_canonical, evidence_type, paper_id)
 
-    # ── Method BASED_ON ─────────────────────────────────────────────────
-
-    def merge_method_based_on(
+    def lookup_evidence_by_fulltext(
         self,
-        *,
-        child_method: str,
-        parent_method: str,
-        confidence: float = 1.0,
-    ) -> None:
+        name:      str,
+        threshold: float = 0.75,
+    ) -> Optional[str]:
         """
-        (Method)-[:BASED_ON]->(Method)
-        VD: phobert → bert
-        Cả 2 method phải tồn tại trước khi gọi hàm này.
+        Full-text search Evidence node theo name và aliases_text.  [v2-10]
+        [fix-13] escape Lucene special chars trước khi query.
         """
         query = """
-        MATCH (m1:Method {name: $child})
-        MATCH (m2:Method {name: $parent})
-        MERGE (m1)-[r:BASED_ON]->(m2)
+        CALL db.index.fulltext.queryNodes('evidence_ft', $query_str)
+        YIELD node, score
+        WHERE score >= $threshold
+        RETURN node.name AS name, score
+        ORDER BY score DESC
+        LIMIT 1
+        """
+        query_str = _escape_lucene(name.strip())
+        results = self.execute_read(query, {"query_str": query_str, "threshold": threshold})
+        if results:
+            logger.debug("lookup_evidence_by_fulltext: found '%s' score=%.2f",
+                         results[0]["name"], results[0]["score"])
+            return results[0]["name"]
+        return None
+
+    # ------------------------------------------------------------------
+    # METRIC  [v2-3]
+    # ------------------------------------------------------------------
+
+    def merge_metric(
+        self,
+        *,
+        paper_id:      str,
+        metric_name:   str,
+        value:         Optional[float] = None,
+        unit:          Optional[str]   = None,
+        higher_better: Optional[bool]  = None,
+        measured_on:   Optional[str]   = None,
+        measured_by:   Optional[str]   = None,
+        confidence:    float           = 1.0,
+        evidence:      str             = "",
+    ) -> None:
+        """
+        MERGE Metric node + edge (Paper)-[:ACHIEVES_METRIC]->(Metric).
+        [fix-12] measured_on/measured_by dùng "" thay None làm MERGE key
+                 để tránh lỗi "Cannot merge with null property value".
+        """
+        name_canonical   = metric_name.lower().strip()
+        measured_on_safe = (measured_on or "").lower().strip()
+        measured_by_safe = (measured_by or "").lower().strip()
+        query = """
+        MERGE (m:Metric {name: $metric_name})
+        ON CREATE SET
+            m.id            = randomUUID(),
+            m.higher_better = $higher_better
+        ON MATCH SET
+            m.higher_better = CASE
+                WHEN $higher_better IS NOT NULL THEN $higher_better ELSE m.higher_better END
+        WITH m
+        MATCH (p:Paper {id: $paper_id})
+        MERGE (p)-[r:ACHIEVES_METRIC {measured_on: $measured_on, measured_by: $measured_by}]->(m)
+        ON CREATE SET
+            r.value        = $value,
+            r.unit         = $unit,
+            r.confidence   = $confidence,
+            r.evidence     = $evidence
+        ON MATCH SET
+            r.value        = CASE WHEN $value IS NOT NULL THEN $value ELSE r.value END,
+            r.unit         = CASE WHEN $unit  IS NOT NULL THEN $unit  ELSE r.unit  END,
+            r.confidence   = CASE WHEN $confidence > r.confidence
+                             THEN $confidence ELSE r.confidence END,
+            r.evidence     = CASE WHEN $confidence > r.confidence
+                             THEN $evidence ELSE r.evidence END
+        """
+        self.execute_write(query, {
+            "metric_name":   name_canonical,
+            "higher_better": higher_better,
+            "paper_id":      paper_id,
+            "measured_on":   measured_on_safe,
+            "measured_by":   measured_by_safe,
+            "value":         value,
+            "unit":          unit,
+            "confidence":    confidence,
+            "evidence":      evidence[:200],
+        })
+        logger.debug("merge_metric: '%s'=%.4g paper=%s",
+                     name_canonical, value or 0, paper_id)
+
+    # ------------------------------------------------------------------
+    # FINDING  [v2-4]
+    # ------------------------------------------------------------------
+
+    def merge_finding(
+        self,
+        *,
+        paper_id:     str,
+        description:  str,
+        finding_type: str   = "result",
+        confidence:   float = 1.0,
+        evidence:     str   = "",
+    ) -> None:
+        desc_key = description[:200].strip()
+        query = """
+        MERGE (f:Finding {description: $description})
+        ON CREATE SET
+            f.id           = randomUUID(),
+            f.finding_type = $finding_type
+        ON MATCH SET
+            f.finding_type = CASE
+                WHEN $finding_type IS NOT NULL THEN $finding_type ELSE f.finding_type END
+        WITH f
+        MATCH (p:Paper {id: $paper_id})
+        MERGE (p)-[r:HAS_FINDING]->(f)
+        ON CREATE SET
+            r.confidence = $confidence,
+            r.evidence   = $evidence
+        ON MATCH SET
+            r.confidence = CASE WHEN $confidence > r.confidence
+                           THEN $confidence ELSE r.confidence END,
+            r.evidence   = CASE WHEN $confidence > r.confidence
+                           THEN $evidence ELSE r.evidence END
+        """
+        self.execute_write(query, {
+            "description":  desc_key,
+            "finding_type": finding_type,
+            "paper_id":     paper_id,
+            "confidence":   confidence,
+            "evidence":     evidence[:200],
+        })
+        logger.debug("merge_finding: type=%s paper=%s", finding_type, paper_id)
+
+    # ------------------------------------------------------------------
+    # CONCEPT HIERARCHY  [v2-5] [v2-6] [v2-14] [v2-15]
+    # ------------------------------------------------------------------
+
+    def merge_concept_based_on(
+        self,
+        *,
+        child_concept:  str,
+        parent_concept: str,
+        confidence:     float = 1.0,
+    ) -> None:
+        """
+        MERGE edge (child)-[:BASED_ON]->(parent).
+
+        [v2-14] Lớp 2 defense: kiểm tra cycle bằng Cypher *1..3 trước MERGE.
+        Lớp 1 (in-memory DFS) đã chạy trong graph_builder._merge_concept_hierarchy —
+        guard này bắt các cross-paper cycle mà in-memory check không thấy.
+
+        Nếu phát hiện cycle: log WARNING + return ngay, KHÔNG raise exception,
+        để pipeline tiếp tục xử lý các edge còn lại bình thường.
+
+        Giới hạn *1..3: đủ để bắt cycle ngắn trong 1 lần ingest mà không
+        scan toàn bộ graph (tránh timeout với graph lớn).
+        """
+        child  = child_concept.lower().strip()
+        parent = parent_concept.lower().strip()
+
+        # Guard: nếu đi từ parent theo BASED_ON *1..3 bước có reach được child → cycle
+        cycle_check_query = """
+        MATCH (c1:Concept {name: $parent}), (c2:Concept {name: $child})
+        MATCH path = (c1)-[:BASED_ON*1..3]->(c2)
+        RETURN count(path) AS cycle_count
+        """
+        try:
+            rows = self.execute_read(cycle_check_query, {"parent": parent, "child": child})
+            if rows and rows[0].get("cycle_count", 0) > 0:
+                logger.warning(
+                    "merge_concept_based_on: CYCLE DETECTED '%s' → '%s' — skip MERGE.",
+                    child, parent,
+                )
+                return
+        except Exception:
+            # Nếu cycle check lỗi (VD: node chưa tồn tại) → bỏ qua guard, tiếp tục MERGE bình thường
+            logger.debug(
+                "merge_concept_based_on: cycle check exception '%s' → '%s' — bỏ qua guard.",
+                child, parent,
+            )
+
+        query = """
+        MATCH (c1:Concept {name: $child})
+        MATCH (c2:Concept {name: $parent})
+        MERGE (c1)-[r:BASED_ON]->(c2)
         ON CREATE SET r.confidence = $confidence
-        RETURN m1.name AS child_found, m2.name AS parent_found
+        ON MATCH SET  r.confidence = CASE WHEN $confidence > r.confidence
+                                     THEN $confidence ELSE r.confidence END
+        RETURN c1.name AS child_found, c2.name AS parent_found
         """
         result = self.execute_write(query, {
-            "child":      child_method.lower().strip(),
-            "parent":     parent_method.lower().strip(),
+            "child":      child,
+            "parent":     parent,
             "confidence": confidence,
         })
         if not result:
             logger.error(
-                "merge_method_based_on: '%s' hoặc '%s' không tồn tại trong graph. "
-                "Gọi merge_method() cho cả 2 trước khi tạo BASED_ON edge.",
-                child_method, parent_method,
+                "merge_concept_based_on: '%s' hoặc '%s' không tồn tại.",
+                child_concept, parent_concept,
             )
             raise Neo4jMergeError(
-                f"merge_method_based_on: method '{child_method}' hoặc "
-                f"'{parent_method}' không tìm thấy"
+                f"merge_concept_based_on: concept '{child_concept}' hoặc "
+                f"'{parent_concept}' không tìm thấy"
+            )
+
+    def merge_concept_extends(
+        self,
+        *,
+        child_concept:  str,
+        parent_concept: str,
+        confidence:     float = 1.0,
+    ) -> None:
+        """
+        MERGE edge (child)-[:EXTENDS]->(parent).
+
+        [v2-15] Tương tự v2-14: Cypher cycle guard *1..3 trước MERGE.
+        Lớp 2 defense cho cross-paper EXTENDS cycles.
+        Nếu phát hiện cycle: log WARNING + return, không raise.
+        """
+        child  = child_concept.lower().strip()
+        parent = parent_concept.lower().strip()
+
+        # Guard: nếu đi từ parent theo EXTENDS *1..3 bước có reach được child → cycle
+        cycle_check_query = """
+        MATCH (c1:Concept {name: $parent}), (c2:Concept {name: $child})
+        MATCH path = (c1)-[:EXTENDS*1..3]->(c2)
+        RETURN count(path) AS cycle_count
+        """
+        try:
+            rows = self.execute_read(cycle_check_query, {"parent": parent, "child": child})
+            if rows and rows[0].get("cycle_count", 0) > 0:
+                logger.warning(
+                    "merge_concept_extends: CYCLE DETECTED '%s' → '%s' — skip MERGE.",
+                    child, parent,
+                )
+                return
+        except Exception:
+            logger.debug(
+                "merge_concept_extends: cycle check exception '%s' → '%s' — bỏ qua guard.",
+                child, parent,
+            )
+
+        query = """
+        MATCH (c1:Concept {name: $child})
+        MATCH (c2:Concept {name: $parent})
+        MERGE (c1)-[r:EXTENDS]->(c2)
+        ON CREATE SET r.confidence = $confidence
+        ON MATCH SET  r.confidence = CASE WHEN $confidence > r.confidence
+                                     THEN $confidence ELSE r.confidence END
+        RETURN c1.name AS child_found, c2.name AS parent_found
+        """
+        result = self.execute_write(query, {
+            "child":      child,
+            "parent":     parent,
+            "confidence": confidence,
+        })
+        if not result:
+            logger.error(
+                "merge_concept_extends: '%s' hoặc '%s' không tồn tại.",
+                child_concept, parent_concept,
+            )
+            raise Neo4jMergeError(
+                f"merge_concept_extends: concept '{child_concept}' hoặc "
+                f"'{parent_concept}' không tìm thấy"
             )
 
     # ------------------------------------------------------------------
-    # SECTION 6 MERGE TEMPLATES — Giai đoạn 3
+    # CITATION GRAPH  [v2-7] [v2-8]
     # ------------------------------------------------------------------
 
-    # ── Citation edge ───────────────────────────────────────────────────
+    def merge_paper_supports(
+        self,
+        *,
+        source_paper_id: str,
+        target_paper_id: str,
+        finding_desc:    str   = "",
+        confidence:      float = 1.0,
+    ) -> None:
+        query = """
+        MATCH (p1:Paper {id: $source_id})
+        MERGE (p2:Paper {id: $target_id})
+        ON CREATE SET
+            p2.processing_status = 'stub',
+            p2.created_at        = datetime()
+        MERGE (p1)-[r:SUPPORTS]->(p2)
+        ON CREATE SET r.finding_desc = $finding_desc, r.confidence = $confidence
+        ON MATCH SET  r.confidence   = CASE WHEN $confidence > r.confidence
+                                       THEN $confidence ELSE r.confidence END
+        RETURN p1.id AS source_found
+        """
+        result = self.execute_write(query, {
+            "source_id":    source_paper_id,
+            "target_id":    target_paper_id,
+            "finding_desc": finding_desc[:200],
+            "confidence":   confidence,
+        })
+        if not result:
+            logger.error(
+                "merge_paper_supports: source_paper_id='%s' không tồn tại.",
+                source_paper_id,
+            )
+            raise Neo4jMergeError(
+                f"merge_paper_supports: source '{source_paper_id}' không tìm thấy"
+            )
+
+    def merge_paper_contradicts(
+        self,
+        *,
+        source_paper_id: str,
+        target_paper_id: str,
+        finding_desc:    str   = "",
+        confidence:      float = 1.0,
+    ) -> None:
+        query = """
+        MATCH (p1:Paper {id: $source_id})
+        MERGE (p2:Paper {id: $target_id})
+        ON CREATE SET
+            p2.processing_status = 'stub',
+            p2.created_at        = datetime()
+        MERGE (p1)-[r:CONTRADICTS]->(p2)
+        ON CREATE SET r.finding_desc = $finding_desc, r.confidence = $confidence
+        ON MATCH SET  r.confidence   = CASE WHEN $confidence > r.confidence
+                                       THEN $confidence ELSE r.confidence END
+        RETURN p1.id AS source_found
+        """
+        result = self.execute_write(query, {
+            "source_id":    source_paper_id,
+            "target_id":    target_paper_id,
+            "finding_desc": finding_desc[:200],
+            "confidence":   confidence,
+        })
+        if not result:
+            logger.error(
+                "merge_paper_contradicts: source_paper_id='%s' không tồn tại.",
+                source_paper_id,
+            )
+            raise Neo4jMergeError(
+                f"merge_paper_contradicts: source '{source_paper_id}' không tìm thấy"
+            )
+
+    # ------------------------------------------------------------------
+    # CITATION  [fix-3] [fix-9] [v2-11]
+    # ------------------------------------------------------------------
 
     def merge_citation(
         self,
         *,
         citing_paper_id: str,
-        cited_doi: Optional[str] = None,
-        cited_title: Optional[str] = None,
-        cited_year: Optional[int] = None,
-        raw_ref_text: str = "",
+        cited_doc_id:    Optional[str] = None,
+        cited_doi:       Optional[str] = None,
+        cited_title:     Optional[str] = None,
+        cited_year:      Optional[int] = None,
+        raw_ref_text:    str           = "",
     ) -> None:
-        """
-        Tạo edge (Paper)-[:CITES]->(Paper).
-        Confidence:
-            1.0 = doi match
-            0.8 = title + year exact
-            0.6 = title only, year = null
+        # Path 1: internal doc_id
+        if cited_doc_id:
+            query = """
+            MATCH (p1:Paper {id: $citing_id})
+            MATCH (p2:Paper {id: $cited_id})
+            MERGE (p1)-[r:CITES]->(p2)
+            ON CREATE SET r.confidence = 1.0, r.raw_ref_text = $raw_ref_text
+            RETURN p1.id AS src, p2.id AS tgt
+            """
+            result = self.execute_write(query, {
+                "citing_id":    citing_paper_id,
+                "cited_id":     cited_doc_id,
+                "raw_ref_text": raw_ref_text[:500],
+            })
+            if result:
+                return
+            logger.warning(
+                "merge_citation: cited_doc_id='%s' không tồn tại — fallback sang doi/title.",
+                cited_doc_id,
+            )
 
-        CẢNH BÁO [fix-3]: khi cited_year=None, 2 paper khác nhau cùng title
-        sẽ bị merge thành 1 node. graph_builder._merge_citation() nên check
-        len(cited_title) >= 10 trước khi gọi hàm này.
-        """
+        # Path 2: doi
         if cited_doi:
-            confidence = 1.0
             query = """
             MATCH (p1:Paper {id: $citing_id})
             MERGE (p2:Paper {doi: $cited_doi})
@@ -904,21 +1210,21 @@ class Neo4jClient:
                 p2.processing_status = 'stub',
                 p2.created_at        = datetime()
             MERGE (p1)-[r:CITES]->(p2)
-            ON CREATE SET
-                r.confidence   = $confidence,
-                r.raw_ref_text = $raw_ref_text
+            ON CREATE SET r.confidence = 1.0, r.raw_ref_text = $raw_ref_text
             """
             self.execute_write(query, {
                 "citing_id":    citing_paper_id,
                 "cited_doi":    cited_doi,
                 "cited_title":  cited_title or "",
                 "cited_year":   cited_year,
-                "confidence":   confidence,
                 "raw_ref_text": raw_ref_text[:500],
             })
+            return
 
-        elif cited_title:
-            confidence = 0.8 if cited_year else 0.6
+        # Path 3: title + year
+        if cited_title:
+            cited_year_safe = cited_year if cited_year is not None else 0
+            confidence      = 0.8 if cited_year else 0.6
             query = """
             MATCH (p1:Paper {id: $citing_id})
             MERGE (p2:Paper {title: $cited_title, year: $cited_year})
@@ -932,100 +1238,42 @@ class Neo4jClient:
                     ELSE p2.processing_status
                 END
             MERGE (p1)-[r:CITES]->(p2)
-            ON CREATE SET
-                r.confidence   = $confidence,
-                r.raw_ref_text = $raw_ref_text
+            ON CREATE SET r.confidence = $confidence, r.raw_ref_text = $raw_ref_text
             """
             self.execute_write(query, {
                 "citing_id":    citing_paper_id,
                 "cited_title":  cited_title,
-                "cited_year":   cited_year,
+                "cited_year":   cited_year_safe,
                 "confidence":   confidence,
                 "raw_ref_text": raw_ref_text[:500],
             })
-        else:
-            logger.warning(
-                "merge_citation: citing=%s — cited paper không có doi lẫn title, bỏ qua",
-                citing_paper_id,
-            )
+            return
+
+        logger.warning(
+            "merge_citation: citing=%s — cited paper không có doc_id, doi, lẫn title. Bỏ qua.",
+            citing_paper_id,
+        )
 
     # ------------------------------------------------------------------
-    # SIMILAR_TO edge — offline recommendation
-    # ------------------------------------------------------------------
-
-    def merge_similar_to(
-        self,
-        *,
-        paper_id_1: str,
-        paper_id_2: str,
-        score: float,
-        shared_methods: list[str] | None = None,
-        shared_authors: list[str] | None = None,
-    ) -> None:
-        """
-        (Paper)-[:SIMILAR_TO {score, shared_methods, shared_authors}]->(Paper)
-        Chỉ insert khi score >= threshold (threshold do caller quyết định).
-        shared_methods / shared_authors lưu dạng string "a|b|c".
-
-        NOTE: SIMILAR_TO cần được thêm vào neo4j_schema.cypher Section 5
-        và thêm index trên r.score nếu query theo score thường xuyên.
-        """
-        query = """
-        MATCH (p1:Paper {id: $id1})
-        MATCH (p2:Paper {id: $id2})
-        MERGE (p1)-[r:SIMILAR_TO]->(p2)
-        ON CREATE SET
-            r.score          = $score,
-            r.shared_methods = $shared_methods,
-            r.shared_authors = $shared_authors
-        ON MATCH SET
-            r.score          = $score
-        RETURN p1.id AS p1_found, p2.id AS p2_found
-        """
-        result = self.execute_write(query, {
-            "id1":            paper_id_1,
-            "id2":            paper_id_2,
-            "score":          round(score, 4),
-            "shared_methods": "|".join(shared_methods or []),
-            "shared_authors": "|".join(shared_authors or []),
-        })
-        if not result:
-            logger.error(
-                "merge_similar_to: paper_id_1='%s' hoặc paper_id_2='%s' không tồn tại.",
-                paper_id_1, paper_id_2,
-            )
-            raise Neo4jMergeError(
-                f"merge_similar_to: '{paper_id_1}' hoặc '{paper_id_2}' không tìm thấy"
-            )
-
-    # ------------------------------------------------------------------
-    # Chunk node — Giai đoạn 3
+    # CHUNK  [fix-11]
     # ------------------------------------------------------------------
 
     def merge_chunk(
         self,
         *,
-        paper_id: str,
-        qdrant_id: str,
-        section: str = "",
-        page: Optional[int] = None,
-        chunk_text: str = "",
+        paper_id:   str,
+        qdrant_id:  str,
+        section:    str           = "",
+        page:       Optional[int] = None,
+        chunk_text: str           = "",
     ) -> None:
-        """
-        MERGE Chunk node + edge (Paper)-[:HAS_CHUNK]->(Chunk).
-        qdrant_id là ID đã lưu trong Qdrant (lấy từ qdrant_client sau khi upsert).
-        Neo4j chỉ lưu preview 1000 chars để debug; full text nằm ở Qdrant.
-        """
-        _CHUNK_TEXT_LIMIT = 1000
-        truncated_text = chunk_text
-        if len(chunk_text) > _CHUNK_TEXT_LIMIT:
+        _LIMIT   = 1000
+        text_out = chunk_text[:_LIMIT]
+        if len(chunk_text) > _LIMIT:
             logger.warning(
-                "merge_chunk: qdrant_id='%s' chunk_text bị truncate từ %d → %d chars. "
-                "Full text xem tại Qdrant.",
-                qdrant_id, len(chunk_text), _CHUNK_TEXT_LIMIT,
+                "merge_chunk: qdrant_id='%s' text truncate %d→%d chars.",
+                qdrant_id, len(chunk_text), _LIMIT,
             )
-            truncated_text = chunk_text[:_CHUNK_TEXT_LIMIT]
-
         query = """
         MERGE (c:Chunk {qdrant_id: $qdrant_id})
         ON CREATE SET
@@ -1042,26 +1290,130 @@ class Neo4jClient:
             "qdrant_id":  qdrant_id,
             "section":    section,
             "page":       page,
-            "chunk_text": truncated_text,
+            "chunk_text": text_out,
             "paper_id":   paper_id,
         })
         if not result:
-            logger.error(
-                "merge_chunk: paper_id='%s' không tồn tại. "
-                "Chunk qdrant_id='%s' không được link vào graph.",
-                paper_id, qdrant_id,
-            )
+            logger.error("merge_chunk: paper_id='%s' không tồn tại.", paper_id)
             raise Neo4jMergeError(f"merge_chunk: paper_id '{paper_id}' không tìm thấy")
 
     # ------------------------------------------------------------------
-    # Utility
+    # SIMILAR_TO
+    # ------------------------------------------------------------------
+
+    def merge_similar_to(
+        self,
+        *,
+        paper_id_1:     str,
+        paper_id_2:     str,
+        score:          float,
+        shared_methods: list[str] | None = None,
+        shared_authors: list[str] | None = None,
+    ) -> None:
+        query = """
+        MATCH (p1:Paper {id: $id1})
+        MATCH (p2:Paper {id: $id2})
+        MERGE (p1)-[r:SIMILAR_TO]->(p2)
+        ON CREATE SET
+            r.score          = $score,
+            r.shared_methods = $shared_methods,
+            r.shared_authors = $shared_authors
+        ON MATCH SET r.score = $score
+        RETURN p1.id AS p1_found, p2.id AS p2_found
+        """
+        result = self.execute_write(query, {
+            "id1":            paper_id_1,
+            "id2":            paper_id_2,
+            "score":          round(score, 4),
+            "shared_methods": "|".join(shared_methods or []),
+            "shared_authors": "|".join(shared_authors or []),
+        })
+        if not result:
+            logger.error(
+                "merge_similar_to: '%s' hoặc '%s' không tồn tại.",
+                paper_id_1, paper_id_2,
+            )
+            raise Neo4jMergeError(
+                f"merge_similar_to: '{paper_id_1}' hoặc '{paper_id_2}' không tìm thấy"
+            )
+
+    # ------------------------------------------------------------------
+    # LEGACY — giữ để backward compat  [v2-13]
+    # DEPRECATED: dùng merge_concept / merge_evidence / merge_concept_based_on thay thế.
+    # ------------------------------------------------------------------
+
+    def merge_method(self, *, paper_id, method_name, category=None, aliases=None,
+                     source_section="method", confidence=1.0, evidence="") -> None:
+        """DEPRECATED — dùng merge_concept() thay thế."""
+        logger.warning("merge_method() is DEPRECATED — dùng merge_concept()")
+        name_canonical = method_name.lower().strip()
+        aliases_text   = "|".join(a.lower().strip() for a in (aliases or []) if a.strip())
+        query = """
+        MERGE (m:Method {name: $method_name})
+        ON CREATE SET m.id=randomUUID(), m.category=$category, m.aliases_text=$aliases_text
+        ON MATCH SET
+            m.category     = CASE WHEN $category IS NOT NULL THEN $category ELSE m.category END,
+            m.aliases_text = CASE
+                WHEN $aliases_text IS NOT NULL AND $aliases_text <> ''
+                    AND (m.aliases_text IS NULL OR m.aliases_text = '')
+                THEN $aliases_text
+                WHEN $aliases_text IS NOT NULL AND $aliases_text <> ''
+                    AND NOT $aliases_text IN split(m.aliases_text, '|')
+                THEN m.aliases_text + '|' + $aliases_text
+                ELSE m.aliases_text
+            END
+        WITH m
+        MATCH (p:Paper {id: $paper_id})
+        MERGE (p)-[r:USES_METHOD]->(m)
+        ON CREATE SET r.source_section=$source_section, r.confidence=$confidence, r.evidence=$evidence
+        ON MATCH SET
+            r.confidence=CASE WHEN $confidence>r.confidence THEN $confidence ELSE r.confidence END,
+            r.evidence=CASE WHEN $confidence>r.confidence THEN $evidence ELSE r.evidence END
+        """
+        self.execute_write(query, {
+            "method_name": name_canonical, "category": category, "aliases_text": aliases_text,
+            "paper_id": paper_id, "source_section": source_section,
+            "confidence": confidence, "evidence": evidence[:200],
+        })
+
+    def lookup_method_by_fulltext(self, name: str, threshold: float = 0.75) -> Optional[str]:
+        """DEPRECATED — dùng lookup_concept_by_fulltext() thay thế."""
+        logger.warning("lookup_method_by_fulltext() is DEPRECATED — dùng lookup_concept_by_fulltext()")
+        return self.lookup_concept_by_fulltext(name, threshold)
+
+    def merge_dataset(self, *, paper_id, dataset_name, dataset_language=None, aliases=None,
+                      source_section="experiment", confidence=1.0, evidence="", metric=None) -> None:
+        """DEPRECATED — dùng merge_evidence() thay thế."""
+        logger.warning("merge_dataset() is DEPRECATED — dùng merge_evidence()")
+        self.merge_evidence(
+            paper_id=paper_id, evidence_name=dataset_name, evidence_type="dataset",
+            language=dataset_language, aliases=aliases, source_section=source_section,
+            confidence=confidence, evidence=evidence,
+        )
+
+    def lookup_dataset_by_fulltext(self, name: str, threshold: float = 0.75) -> Optional[str]:
+        """DEPRECATED — dùng lookup_evidence_by_fulltext() thay thế."""
+        logger.warning("lookup_dataset_by_fulltext() is DEPRECATED — dùng lookup_evidence_by_fulltext()")
+        return self.lookup_evidence_by_fulltext(name, threshold)
+
+    def merge_task(self, *, paper_id, task_name, source_section="abstract",
+                   confidence=1.0, evidence="") -> None:
+        """DEPRECATED — dùng merge_concept(category='task') thay thế."""
+        logger.warning("merge_task() is DEPRECATED — dùng merge_concept(category='task')")
+        self.merge_concept(paper_id=paper_id, concept_name=task_name, category="task",
+                           source_section=source_section, confidence=confidence, evidence=evidence)
+
+    def merge_method_based_on(self, *, child_method, parent_method, confidence=1.0) -> None:
+        """DEPRECATED — dùng merge_concept_based_on() thay thế."""
+        logger.warning("merge_method_based_on() is DEPRECATED — dùng merge_concept_based_on()")
+        self.merge_concept_based_on(child_concept=child_method, parent_concept=parent_method,
+                                    confidence=confidence)
+
+    # ------------------------------------------------------------------
+    # UTILITY
     # ------------------------------------------------------------------
 
     def set_paper_status(self, paper_id: str, status: str) -> None:
-        """
-        status: "stub" | "parsed" | "kg_built" | "embedded"
-        Gọi sau khi hoàn thành từng giai đoạn của pipeline.
-        """
         valid = {"stub", "parsed", "kg_built", "embedded"}
         if status not in valid:
             raise ValueError(f"set_paper_status: status không hợp lệ '{status}'. Phải là {valid}")
@@ -1070,16 +1422,16 @@ class Neo4jClient:
 
     def get_paper_by_id(self, paper_id: str) -> Optional[dict]:
         query = "MATCH (p:Paper {id: $id}) RETURN p"
-        rows = self.execute_read(query, {"id": paper_id})
+        rows  = self.execute_read(query, {"id": paper_id})
         return dict(rows[0]["p"]) if rows else None
 
     def get_papers_by_status(self, status: str) -> list[dict]:
         query = "MATCH (p:Paper {processing_status: $status}) RETURN p"
-        rows = self.execute_read(query, {"status": status})
+        rows  = self.execute_read(query, {"status": status})
         return [dict(r["p"]) for r in rows]
 
     # ------------------------------------------------------------------
-    # Health check
+    # HEALTH CHECK
     # ------------------------------------------------------------------
 
     def ping(self) -> bool:
