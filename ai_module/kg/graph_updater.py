@@ -1,70 +1,62 @@
 """
 ai_module/kg/graph_updater.py
 
-Cập nhật Knowledge Graph sau khi đã build xong (graph_builder.py).
-Trong khi graph_builder.py chỉ INSERT lần đầu, graph_updater.py xử lý:
+Cập nhật Knowledge Graph sau khi graph_builder.py đã build xong.
 
-    1. EntityMerger      — gộp các node trùng nhau (alias dedup, fuzzy match)
-    2. ProvenanceUpdater — cập nhật source_paper, source_section, confidence
-                           khi cùng 1 entity xuất hiện ở nhiều paper
-    3. ConsistencyChecker— phát hiện conflict, inverse-edge duplicate,
-                           entity không có evidence
+    1. EntityMerger      — gộp Concept/Evidence node trùng nhau (alias dedup)
+    2. ProvenanceUpdater — cập nhật source_paper, source_section, confidence trên edges
+    3. ConsistencyChecker— phát hiện conflict, duplicate edge, orphan node
 
-Thứ tự khuyến nghị khi chạy:
+Thứ tự khuyến nghị:
     updater = GraphUpdater(neo4j_client)
-    updater.run_all(paper_id)           # chạy cả 3 bước theo đúng thứ tự
+    report  = updater.run_all(paper_id, entities)
 
-Hoặc từng bước riêng:
-    updater.merge_entities(paper_id)
-    updater.update_provenance(paper_id)
-    updater.check_consistency(paper_id)
-
-Requires:
-    - graph_builder.py đã chạy xong (paper.processing_status = 'kg_built')
-    - neo4j_client cung cấp đủ các method theo Neo4jClientProtocol bên dưới
+Node label và edge type (khớp graph_builder.py v3 + relation_extractor.py v3):
+    Node: Paper, Author, Institution, Venue, Topic, Concept, Evidence, Metric, Finding, Chunk
+    Edge: WROTE, PUBLISHED_AT, HAS_TOPIC, CITES,
+          USES_CONCEPT, EVALUATES_ON, ACHIEVES_METRIC,
+          BASED_ON, EXTENDS, SUPPORTS, CONTRADICTS, HAS_CHUNK
 
 Changelog:
+    v3 — 2025-05 (sync entities.py v2)
+        [v3-1]  Bỏ import MethodEntity/DatasetEntity/TaskEntity → ConceptEntity/EvidenceEntity
+        [v3-2]  Neo4jClientProtocol: lookup_method/dataset → lookup_concept/evidence
+        [v3-3]  EntityMerger: entities.methods/datasets/tasks → concepts/evidences
+        [v3-4]  EntityMerger: label "Method"/"Dataset"/"Task" → "Concept"/"Evidence"
+        [v3-5]  EntityMerger: _MERGE_METHOD/DATASET_CYPHER → _MERGE_CONCEPT/EVIDENCE_CYPHER
+        [v3-6]  ProvenanceUpdater: Cypher USES_METHOD → USES_CONCEPT, (m:Method) → (c:Concept)
+                EVALUATES_ON (d:Dataset) → (e:Evidence), xóa ADDRESSES_TASK (Task là Concept)
+        [v3-7]  ProvenanceUpdater: dataset.metric → bỏ (EvidenceEntity không có metric field)
+        [v3-8]  ConsistencyChecker: label/edge type update toàn bộ
+        [v3-9]  Thêm check ORPHAN_EVIDENCE, bỏ ORPHAN_DATASET
+
     v2 — 2025-05
-        [fix-1] Import ExtractedEntities và entity classes từ entities.py thay vì
-                graph_builder.py — graph_builder không định nghĩa các class này,
-                chỉ re-export ngầm → coupling dễ vỡ khi graph_builder thay đổi
-        [fix-2] APOC availability guard trong EntityMerger.__init__:
-                kiểm tra apoc.refactor.mergeNodes trước khi dùng,
-                fallback graceful nếu APOC không có (Neo4j Community Edition)
-        [fix-3] ProvenanceUpdater._update_method/dataset/task_edge dùng
-                confidence-aware SET — chỉ overwrite evidence khi confidence
-                mới >= hiện tại, nhất quán với ON MATCH SET trong neo4j_client
-        [fix-4] Thêm _normalize_name re-export từ entities.py thay vì
-                định nghĩa lại — tránh diverge logic normalize
+        [fix-1..4] — xem changelog gốc
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
 from ingestion.schema.document_schema import UnifiedDocument
 
-# [fix-1] Import trực tiếp từ entities.py — nguồn của sự thật duy nhất
-# graph_builder.py không định nghĩa các class này, chỉ re-export ngầm
-# → dễ vỡ nếu graph_builder thay đổi import structure
 from ai_module.kg.entities import (
     ExtractedEntities,
-    MethodEntity,
-    DatasetEntity,
-    TaskEntity,
-    normalize_entity_name,  # [fix-4] dùng chung, không định nghĩa lại
+    ConceptEntity,
+    EvidenceEntity,
+    normalize_entity_name,
 )
 
 logger = logging.getLogger(__name__)
 
+# Alias — không định nghĩa lại
+_normalize_name = normalize_entity_name
+
 
 # =============================================================================
 # NEO4J CLIENT PROTOCOL
-# Định nghĩa tập method tối thiểu graph_updater cần từ Neo4jClient.
-# Dùng Protocol để dễ mock trong test, không phụ thuộc import vòng tròn.
 # =============================================================================
 
 @runtime_checkable
@@ -74,19 +66,23 @@ class Neo4jClientProtocol(Protocol):
         """Chạy Cypher query, trả về list[dict] rows."""
         ...
 
-    def lookup_method_by_fulltext(
+    def lookup_concept_by_fulltext(
         self, name: str, threshold: float = 0.75
     ) -> Optional[str]:
         """
-        Tìm Method node gần đúng theo name + aliases_text.
+        Tìm Concept node gần đúng theo name + aliases_text.
         Trả về node name nếu tìm thấy, None nếu không.
+        [v3-2] Thay lookup_method_by_fulltext + lookup_task_by_fulltext.
         """
         ...
 
-    def lookup_dataset_by_fulltext(
+    def lookup_evidence_by_fulltext(
         self, name: str, threshold: float = 0.75
     ) -> Optional[str]:
-        """Tương tự lookup_method nhưng cho Dataset."""
+        """
+        Tìm Evidence node gần đúng.
+        [v3-2] Thay lookup_dataset_by_fulltext.
+        """
         ...
 
     def get_paper_by_id(self, paper_id: str) -> Optional[dict]:
@@ -99,72 +95,58 @@ class Neo4jClientProtocol(Protocol):
 
 
 # =============================================================================
-# VALUE OBJECTS — kết quả từ từng bước
+# VALUE OBJECTS
 # =============================================================================
 
 @dataclass
 class MergeResult:
-    """Kết quả sau EntityMerger.merge_entities()."""
-    paper_id: str
-    methods_merged: int = 0     # số cặp Method node được gộp
-    datasets_merged: int = 0
-    tasks_merged: int = 0
-    aliases_registered: int = 0 # số alias mới được thêm vào aliases_text
-    apoc_available: bool = True  # [fix-2] False nếu APOC không có
+    paper_id:             str
+    concepts_merged:      int  = 0   # số cặp Concept node được gộp
+    evidences_merged:     int  = 0   # số cặp Evidence node được gộp
+    aliases_registered:   int  = 0
+    apoc_available:       bool = True
 
 
 @dataclass
 class ProvenanceUpdate:
-    """1 lần cập nhật provenance trên 1 edge."""
-    node_type: str          # "Method" | "Dataset" | "Task"
-    node_name: str
-    paper_id: str
+    node_type:      str    # "Concept" | "Evidence"
+    node_name:      str
+    paper_id:       str
     source_section: str
-    confidence: float
-    evidence: str
+    confidence:     float
+    evidence:       str
 
 
 @dataclass
 class ConsistencyIssue:
-    """1 vấn đề phát hiện bởi ConsistencyChecker."""
-    issue_type: str         # xem _ISSUE_TYPES bên dưới
+    issue_type:  str
     description: str
-    node_type: str = ""
-    node_name: str = ""
-    paper_id: str = ""
-    severity: str = "warning"  # "warning" | "error"
+    node_type:   str  = ""
+    node_name:   str  = ""
+    paper_id:    str  = ""
+    severity:    str  = "warning"   # "warning" | "error"
 
 
 _ISSUE_TYPES = {
-    "DUPLICATE_EDGE":    "Duplicate edge giữa 2 node",
-    "INVERSE_EDGE":      "Edge thuận và nghịch cùng tồn tại",
-    "NO_EVIDENCE":       "Entity có confidence > 0 nhưng không có evidence",
-    "ORPHAN_METHOD":     "Method không có Paper nào link đến",
-    "ORPHAN_DATASET":    "Dataset không có Paper nào link đến",
-    "LOW_CONFIDENCE":    "Edge confidence dưới ngưỡng tối thiểu",
+    "DUPLICATE_EDGE":   "Duplicate edge giữa 2 node",
+    "INVERSE_EDGE":     "Edge thuận và nghịch cùng tồn tại",
+    "NO_EVIDENCE":      "Entity confidence > threshold nhưng không có evidence",
+    "ORPHAN_CONCEPT":   "Concept không có Paper nào link đến",
+    "ORPHAN_EVIDENCE":  "Evidence không có Paper nào link đến",
+    "LOW_CONFIDENCE":   "Edge confidence dưới ngưỡng tối thiểu",
 }
 
 
 # =============================================================================
-# HELPERS — dùng chung giữa các class
+# HELPERS
 # =============================================================================
 
-# [fix-4] Alias _normalize_name → normalize_entity_name từ entities.py
-# Không định nghĩa lại để tránh logic diverge giữa extractor và updater
-_normalize_name = normalize_entity_name
-
-
 def _aliases_to_text(aliases: list[str]) -> str:
-    """
-    Chuyển list alias → pipe-separated string để lưu vào Neo4j.
-    Neo4j full-text index chỉ hoạt động trên STRING, không phải list.
-    VD: ["PhoBERT", "pho-bert"] → "phobert|pho-bert"
-    """
+    """list alias → pipe-separated string cho Neo4j full-text index."""
     return "|".join(a.strip() for a in aliases if a.strip())
 
 
 def _text_to_aliases(aliases_text: str) -> list[str]:
-    """Ngược lại với _aliases_to_text."""
     if not aliases_text:
         return []
     return [a.strip() for a in aliases_text.split("|") if a.strip()]
@@ -172,37 +154,30 @@ def _text_to_aliases(aliases_text: str) -> list[str]:
 
 # =============================================================================
 # ENTITY MERGER
-# Gộp các node trùng nhau sau khi LLM extract từ nhiều section / nhiều paper.
 # =============================================================================
 
 class EntityMerger:
     """
-    Phát hiện và gộp entity node trùng nhau trong Neo4j.
+    Phát hiện và gộp Concept/Evidence node trùng nhau.
 
-    Vấn đề cần giải quyết:
-        - entity_extractor chạy per-section → có thể tạo Method node "phobert"
-          và "pho-bert" riêng biệt nếu 2 section dùng tên khác nhau
-        - graph_builder dùng MERGE (m:Method {name: $name}) → exact match,
-          không bắt được alias
+    Vấn đề: entity_extractor chạy per-section → có thể tạo "phobert" và "pho-bert"
+    riêng biệt vì MERGE dùng exact name match.
 
     Cách hoạt động:
-        1. Lấy tất cả entity của paper vừa build
-        2. Với mỗi entity, tìm node có normalized name trùng hoặc fulltext match
-        3. Nếu tìm thấy node khác đã tồn tại → merge (redirect edges + delete duplicate)
-        4. Nếu không → đăng ký alias vào aliases_text để tìm lần sau
+        1. Lấy tất cả Concept/Evidence của paper vừa build
+        2. Lookup fulltext → tìm node tương tự đã tồn tại
+        3. Nếu tìm thấy → merge 2 node (APOC) hoặc đăng ký alias (fallback)
+        4. Nếu không → đăng ký alias mới vào aliases_text
 
-    [fix-2] APOC guard:
-        apoc.refactor.mergeNodes yêu cầu APOC plugin — không có sẵn trong
-        Neo4j Community Edition. EntityMerger kiểm tra APOC khi khởi tạo.
-        Nếu không có APOC: skip merge node (chỉ đăng ký alias), log warning 1 lần.
-        Không raise exception — pipeline vẫn chạy được, chỉ mất tính năng dedup.
+    [fix-2] APOC guard: apoc.refactor.mergeNodes cần APOC plugin.
+    Fallback graceful nếu không có APOC (Neo4j Community Edition).
     """
 
-    _MERGE_METHOD_CYPHER = """
-        MATCH (old:Method {name: $old_name})
-        MATCH (new:Method {name: $new_name})
+    # [v3-5] Đổi label Method → Concept
+    _MERGE_CONCEPT_CYPHER = """
+        MATCH (old:Concept {name: $old_name})
+        MATCH (new:Concept {name: $new_name})
         WHERE old <> new
-        // Redirect tất cả edge từ Paper vào old → new
         CALL apoc.refactor.mergeNodes([old, new], {
             properties: 'combine',
             mergeRels: true
@@ -211,9 +186,10 @@ class EntityMerger:
         RETURN node.name AS merged
     """
 
-    _MERGE_DATASET_CYPHER = """
-        MATCH (old:Dataset {name: $old_name})
-        MATCH (new:Dataset {name: $new_name})
+    # [v3-5] Đổi label Dataset → Evidence
+    _MERGE_EVIDENCE_CYPHER = """
+        MATCH (old:Evidence {name: $old_name})
+        MATCH (new:Evidence {name: $new_name})
         WHERE old <> new
         CALL apoc.refactor.mergeNodes([old, new], {
             properties: 'combine',
@@ -235,7 +211,6 @@ class EntityMerger:
         RETURN n.name AS name, n.aliases_text AS aliases_text
     """
 
-    # Query kiểm tra APOC có available không  [fix-2]
     _CHECK_APOC_CYPHER = """
         CALL apoc.help('refactor') YIELD name
         WHERE name = 'apoc.refactor.mergeNodes'
@@ -243,33 +218,24 @@ class EntityMerger:
     """
 
     def __init__(self, client: Neo4jClientProtocol) -> None:
-        self._client = client
-        self._apoc_available = self._check_apoc()  # [fix-2]
+        self._client        = client
+        self._apoc_available = self._check_apoc()
 
     def _check_apoc(self) -> bool:
-        """
-        Kiểm tra APOC plugin có available không.  [fix-2]
-        Trả về True nếu có, False nếu không (Neo4j Community / thiếu plugin).
-        Chỉ log warning 1 lần khi khởi tạo — không spam per-call.
-        """
         try:
-            rows = self._client.run_query(self._CHECK_APOC_CYPHER)
+            rows      = self._client.run_query(self._CHECK_APOC_CYPHER)
             available = bool(rows and rows[0].get("cnt", 0) > 0)
             if not available:
                 logger.warning(
-                    "EntityMerger: APOC plugin không available "
-                    "(apoc.refactor.mergeNodes không tìm thấy). "
-                    "Node merge sẽ bị skip — chỉ alias registration được thực hiện. "
-                    "Để enable APOC: thêm APOC jar vào Neo4j plugins/ directory."
+                    "EntityMerger: APOC không available — node merge bị skip, "
+                    "chỉ alias registration. Thêm APOC jar vào Neo4j plugins/ để enable."
                 )
             else:
                 logger.debug("EntityMerger: APOC available — node merge enabled.")
             return available
         except Exception as e:
             logger.warning(
-                "EntityMerger: không thể kiểm tra APOC availability (%s). "
-                "Giả định APOC không có — node merge bị skip.",
-                e,
+                "EntityMerger: không kiểm tra được APOC (%s) — giả định không có.", e
             )
             return False
 
@@ -278,45 +244,34 @@ class EntityMerger:
         paper_id: str,
         entities: ExtractedEntities,
     ) -> MergeResult:
-        """
-        Gộp entity duplicate cho 1 paper vừa build.
-
-        Thứ tự:
-            1. Method merge
-            2. Dataset merge
-            3. Task merge (ít xảy ra duplicate hơn vì tên task chuẩn)
-        """
+        """Gộp Concept + Evidence duplicate cho 1 paper vừa build."""
         result = MergeResult(paper_id=paper_id, apoc_available=self._apoc_available)
 
-        result.methods_merged, result.aliases_registered = self._merge_entity_list(
-            entities=entities.methods,
-            lookup_fn=self._client.lookup_method_by_fulltext,
-            merge_cypher=self._MERGE_METHOD_CYPHER,
-            label="Method",
+        # [v3-3] entities.concepts thay entities.methods + tasks
+        result.concepts_merged, result.aliases_registered = self._merge_entity_list(
+            entities=entities.concepts,
+            lookup_fn=self._client.lookup_concept_by_fulltext,
+            merge_cypher=self._MERGE_CONCEPT_CYPHER,
+            label="Concept",
         )
 
-        result.datasets_merged, aliases_ds = self._merge_entity_list(
-            entities=entities.datasets,
-            lookup_fn=self._client.lookup_dataset_by_fulltext,
-            merge_cypher=self._MERGE_DATASET_CYPHER,
-            label="Dataset",
+        # [v3-3] entities.evidences thay entities.datasets
+        result.evidences_merged, aliases_ev = self._merge_entity_list(
+            entities=entities.evidences,
+            lookup_fn=self._client.lookup_evidence_by_fulltext,
+            merge_cypher=self._MERGE_EVIDENCE_CYPHER,
+            label="Evidence",
         )
-        result.aliases_registered += aliases_ds
-
-        # Task: không merge node (tên task đã canonical), chỉ đăng ký alias
-        for task in entities.tasks:
-            if _normalize_name(task.name) != task.name:
-                self._register_alias(label="Task", canonical=task.name, alias=task.name)
-                result.aliases_registered += 1
+        result.aliases_registered += aliases_ev
 
         logger.info(
-            "EntityMerger: paper_id=%s methods_merged=%d datasets_merged=%d "
+            "EntityMerger: paper_id=%s concepts_merged=%d evidences_merged=%d "
             "aliases=%d apoc=%s",
             paper_id,
-            result.methods_merged,
-            result.datasets_merged,
+            result.concepts_merged,
+            result.evidences_merged,
             result.aliases_registered,
-            "yes" if self._apoc_available else "no (skip merge)",
+            "yes" if self._apoc_available else "no (alias only)",
         )
         return result
 
@@ -331,18 +286,7 @@ class EntityMerger:
         merge_cypher: str,
         label: str,
     ) -> tuple[int, int]:
-        """
-        Với mỗi entity trong list:
-            - Lookup fulltext → tìm node có name/alias tương tự
-            - Nếu tìm thấy node KHÁC:
-                - APOC available  → merge 2 node lại (redirect edges)
-                - APOC không có   → skip merge, chỉ log debug  [fix-2]
-            - Nếu không → đăng ký alias mới vào aliases_text
-
-        Returns:
-            (merged_count, alias_registered_count)
-        """
-        merged = 0
+        merged  = 0
         aliases = 0
         seen_normalized: set[str] = set()
 
@@ -355,7 +299,6 @@ class EntityMerger:
             existing_name = lookup_fn(entity.name, threshold=0.75)
 
             if existing_name and existing_name != entity.name:
-                # [fix-2] Chỉ merge nếu APOC available
                 if self._apoc_available:
                     try:
                         self._client.run_query(
@@ -368,29 +311,24 @@ class EntityMerger:
                         )
                         merged += 1
                         logger.debug(
-                            "EntityMerger._merge_entity_list[%s]: merged '%s' → '%s'",
+                            "EntityMerger[%s]: merged '%s' → '%s'",
                             label, entity.name, existing_name,
                         )
                     except Exception:
                         logger.exception(
-                            "EntityMerger: merge thất bại '%s' → '%s' — bỏ qua",
+                            "EntityMerger: merge thất bại '%s' → '%s'",
                             entity.name, existing_name,
                         )
                 else:
-                    # [fix-2] APOC không có — đăng ký alias thay thế để
-                    # fulltext search vẫn tìm được entity qua cả 2 tên
+                    # APOC không có → chỉ đăng ký alias
                     logger.debug(
-                        "EntityMerger[%s]: APOC skip — đăng ký '%s' là alias của '%s'",
+                        "EntityMerger[%s]: APOC skip — alias '%s' → '%s'",
                         label, entity.name, existing_name,
                     )
-                    self._register_alias(
-                        label=label,
-                        canonical=existing_name,
-                        alias=entity.name,
-                    )
+                    self._register_alias(label=label, canonical=existing_name, alias=entity.name)
                     aliases += 1
             else:
-                # Không có node match → đăng ký alias để tìm lần sau
+                # Không có node match → đăng ký alias từ entity
                 for alias in getattr(entity, "aliases", []):
                     if alias and _normalize_name(alias) != norm:
                         self._register_alias(label=label, canonical=entity.name, alias=alias)
@@ -399,7 +337,6 @@ class EntityMerger:
         return merged, aliases
 
     def _register_alias(self, label: str, canonical: str, alias: str) -> None:
-        """Thêm alias vào aliases_text của node, tránh duplicate."""
         cypher = self._UPDATE_ALIASES_CYPHER.format(label=label)
         try:
             self._client.run_query(
@@ -415,62 +352,45 @@ class EntityMerger:
 
 # =============================================================================
 # PROVENANCE UPDATER
-# Cập nhật source_paper, source_section, confidence trên các edges
-# khi cùng 1 entity xuất hiện ở nhiều paper.
 # =============================================================================
 
 class ProvenanceUpdater:
     """
-    Đảm bảo mỗi edge (Paper)-[r]->(Entity) có đủ provenance:
-        r.source_paper   — paper_id của paper đang build
-        r.source_section — section extract được ("method", "experiment", ...)
-        r.confidence     — float 0.0 → 1.0
-        r.evidence       — câu văn gốc, max 200 chars
+    Đảm bảo mỗi edge có đủ provenance: source_paper, source_section, confidence, evidence.
 
-    [fix-3] Confidence-aware SET:
-        Thay vì force-overwrite evidence bất kể confidence,
-        chỉ update evidence khi confidence mới >= hiện tại.
-        Nhất quán với ON MATCH SET logic trong neo4j_client.py.
-        Lý do: nếu paper B ingest sau paper A với confidence thấp hơn,
-        evidence tốt của A không bị mất.
+    [fix-3] / [v3-7] Confidence-aware SET:
+        Chỉ overwrite evidence khi confidence mới >= hiện tại.
+        EvidenceEntity không có field metric → bỏ r.metric trên EVALUATES_ON edge.
+        Metric nằm trên ACHIEVES_METRIC edge riêng — không cần update ở đây.
     """
 
-    # [fix-3] Dùng CASE WHEN để chỉ overwrite evidence khi confidence mới cao hơn
-    _UPDATE_METHOD_EDGE = """
-        MATCH (p:Paper {id: $paper_id})-[r:USES_METHOD]->(m:Method {name: $method_name})
+    # [v3-6] USES_CONCEPT thay USES_METHOD, (c:Concept) thay (m:Method)
+    _UPDATE_CONCEPT_EDGE = """
+        MATCH (p:Paper {id: $paper_id})-[r:USES_CONCEPT]->(c:Concept {name: $concept_name})
         SET r.source_paper   = $source_paper,
             r.source_section = $source_section,
             r.confidence     = CASE WHEN $confidence >= r.confidence
                                THEN $confidence ELSE r.confidence END,
             r.evidence       = CASE WHEN $confidence >= r.confidence
-                               THEN $evidence ELSE r.evidence END
+                               THEN $evidence   ELSE r.evidence   END
         RETURN r.confidence AS confidence
     """
 
-    # [fix-3] Tương tự cho EVALUATES_ON
-    _UPDATE_DATASET_EDGE = """
-        MATCH (p:Paper {id: $paper_id})-[r:EVALUATES_ON]->(d:Dataset {name: $dataset_name})
+    # [v3-6] (e:Evidence) thay (d:Dataset), [v3-7] bỏ r.metric
+    _UPDATE_EVIDENCE_EDGE = """
+        MATCH (p:Paper {id: $paper_id})-[r:EVALUATES_ON]->(e:Evidence {name: $evidence_name})
         SET r.source_paper   = $source_paper,
             r.source_section = $source_section,
             r.confidence     = CASE WHEN $confidence >= r.confidence
                                THEN $confidence ELSE r.confidence END,
             r.evidence       = CASE WHEN $confidence >= r.confidence
-                               THEN $evidence ELSE r.evidence END,
-            r.metric         = $metric
+                               THEN $evidence   ELSE r.evidence   END
         RETURN r.confidence AS confidence
     """
 
-    # [fix-3] Tương tự cho ADDRESSES_TASK
-    _UPDATE_TASK_EDGE = """
-        MATCH (p:Paper {id: $paper_id})-[r:ADDRESSES_TASK]->(t:Task {name: $task_name})
-        SET r.source_paper   = $source_paper,
-            r.source_section = $source_section,
-            r.confidence     = CASE WHEN $confidence >= r.confidence
-                               THEN $confidence ELSE r.confidence END,
-            r.evidence       = CASE WHEN $confidence >= r.confidence
-                               THEN $evidence ELSE r.evidence END
-        RETURN r.confidence AS confidence
-    """
+    # NOTE: ACHIEVES_METRIC edge — không cần update provenance ở đây
+    # vì Metric được extract từ text với context rõ ràng (value, unit, measured_on/by)
+    # ProvenanceUpdater chỉ cần update USES_CONCEPT + EVALUATES_ON
 
     def __init__(self, client: Neo4jClientProtocol) -> None:
         self._client = client
@@ -480,82 +400,54 @@ class ProvenanceUpdater:
         paper_id: str,
         entities: ExtractedEntities,
     ) -> list[ProvenanceUpdate]:
-        """
-        Update provenance trên tất cả edges của paper_id.
-        Gọi sau EntityMerger để merge đã xong trước khi set provenance.
-
-        [fix-3] Chỉ overwrite evidence khi confidence mới >= hiện tại.
-
-        Returns:
-            list[ProvenanceUpdate] — log các update đã thực hiện
-        """
+        """Update provenance trên USES_CONCEPT + EVALUATES_ON edges."""
         updates: list[ProvenanceUpdate] = []
 
-        for method in entities.methods:
+        # [v3-3] entities.concepts thay entities.methods + tasks
+        for concept in entities.concepts:
             ok = self._update_edge(
-                cypher=self._UPDATE_METHOD_EDGE,
+                cypher=self._UPDATE_CONCEPT_EDGE,
                 params={
                     "paper_id":       paper_id,
-                    "method_name":    method.name,
+                    "concept_name":   concept.name,
                     "source_paper":   paper_id,
-                    "source_section": method.source_section,
-                    "confidence":     method.confidence,
-                    "evidence":       (method.evidence or "")[:200],
+                    "source_section": concept.source_section or "unknown",
+                    "confidence":     concept.confidence,
+                    "evidence":       (concept.evidence or "")[:200],
                 },
             )
             if ok:
                 updates.append(ProvenanceUpdate(
-                    node_type="Method",
-                    node_name=method.name,
+                    node_type="Concept",
+                    node_name=concept.name,
                     paper_id=paper_id,
-                    source_section=method.source_section,
-                    confidence=method.confidence,
-                    evidence=method.evidence,
+                    source_section=concept.source_section or "unknown",
+                    confidence=concept.confidence,
+                    evidence=concept.evidence,
                 ))
 
-        for dataset in entities.datasets:
+        # [v3-3] entities.evidences thay entities.datasets
+        # [v3-7] không có metric field trên EvidenceEntity
+        for ev in entities.evidences:
             ok = self._update_edge(
-                cypher=self._UPDATE_DATASET_EDGE,
+                cypher=self._UPDATE_EVIDENCE_EDGE,
                 params={
                     "paper_id":       paper_id,
-                    "dataset_name":   dataset.name,
+                    "evidence_name":  ev.name,
                     "source_paper":   paper_id,
-                    "source_section": dataset.source_section,
-                    "confidence":     dataset.confidence,
-                    "evidence":       (dataset.evidence or "")[:200],
-                    "metric":         dataset.metric,
+                    "source_section": ev.source_section or "unknown",
+                    "confidence":     ev.confidence,
+                    "evidence":       (ev.evidence or "")[:200],
                 },
             )
             if ok:
                 updates.append(ProvenanceUpdate(
-                    node_type="Dataset",
-                    node_name=dataset.name,
+                    node_type="Evidence",
+                    node_name=ev.name,
                     paper_id=paper_id,
-                    source_section=dataset.source_section,
-                    confidence=dataset.confidence,
-                    evidence=dataset.evidence,
-                ))
-
-        for task in entities.tasks:
-            ok = self._update_edge(
-                cypher=self._UPDATE_TASK_EDGE,
-                params={
-                    "paper_id":       paper_id,
-                    "task_name":      task.name,
-                    "source_paper":   paper_id,
-                    "source_section": task.source_section,
-                    "confidence":     task.confidence,
-                    "evidence":       (task.evidence or "")[:200],
-                },
-            )
-            if ok:
-                updates.append(ProvenanceUpdate(
-                    node_type="Task",
-                    node_name=task.name,
-                    paper_id=paper_id,
-                    source_section=task.source_section,
-                    confidence=task.confidence,
-                    evidence=task.evidence,
+                    source_section=ev.source_section or "unknown",
+                    confidence=ev.confidence,
+                    evidence=ev.evidence,
                 ))
 
         logger.info(
@@ -564,14 +456,7 @@ class ProvenanceUpdater:
         )
         return updates
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     def _update_edge(self, cypher: str, params: dict) -> bool:
-        """
-        Chạy update cypher. Trả về True nếu có ít nhất 1 row được update.
-        """
         try:
             rows = self._client.run_query(cypher, params)
             return bool(rows)
@@ -585,76 +470,78 @@ class ProvenanceUpdater:
 
 # =============================================================================
 # CONSISTENCY CHECKER
-# Phát hiện các vấn đề trong graph sau khi build + merge + provenance update.
 # =============================================================================
 
 class ConsistencyChecker:
     """
-    Kiểm tra tính nhất quán của graph sau khi build.
+    Kiểm tra tính nhất quán graph sau build + merge + provenance.
 
-    Các loại vấn đề được kiểm tra:
-        1. DUPLICATE_EDGE    — cùng (Paper, Method) có 2+ edge USES_METHOD
-        2. INVERSE_EDGE      — Method A BASED_ON B và B BASED_ON A cùng tồn tại
-        3. NO_EVIDENCE       — edge có confidence > 0.5 nhưng evidence rỗng
-        4. ORPHAN_METHOD     — Method không có Paper nào link đến
-        5. ORPHAN_DATASET    — Dataset không có Paper nào link đến
-        6. LOW_CONFIDENCE    — edge confidence < min_confidence
+    Checks:
+        DUPLICATE_EDGE  — cùng (Paper, Concept/Evidence) có 2+ edge
+        INVERSE_EDGE    — Concept A BASED_ON B và B BASED_ON A cùng tồn tại
+        NO_EVIDENCE     — edge confidence > threshold nhưng evidence rỗng
+        ORPHAN_CONCEPT  — Concept không có Paper nào link đến
+        ORPHAN_EVIDENCE — Evidence không có Paper nào link đến
+        LOW_CONFIDENCE  — edge confidence < min_confidence
 
-    Không auto-fix — chỉ report để người dùng quyết định.
+    Không auto-fix — chỉ report.
     """
 
-    _CHECK_DUPLICATE_METHOD_EDGE = """
-        MATCH (p:Paper {id: $paper_id})-[r:USES_METHOD]->(m:Method)
-        WITH p, m, count(r) AS cnt
+    # [v3-8] Đổi label/edge type toàn bộ
+    _CHECK_DUPLICATE_CONCEPT_EDGE = """
+        MATCH (p:Paper {id: $paper_id})-[r:USES_CONCEPT]->(c:Concept)
+        WITH p, c, count(r) AS cnt
         WHERE cnt > 1
-        RETURN m.name AS name, cnt
+        RETURN c.name AS name, cnt
     """
 
-    _CHECK_DUPLICATE_DATASET_EDGE = """
-        MATCH (p:Paper {id: $paper_id})-[r:EVALUATES_ON]->(d:Dataset)
-        WITH p, d, count(r) AS cnt
+    _CHECK_DUPLICATE_EVIDENCE_EDGE = """
+        MATCH (p:Paper {id: $paper_id})-[r:EVALUATES_ON]->(e:Evidence)
+        WITH p, e, count(r) AS cnt
         WHERE cnt > 1
-        RETURN d.name AS name, cnt
+        RETURN e.name AS name, cnt
     """
 
     _CHECK_INVERSE_BASED_ON = """
-        MATCH (a:Method)-[:BASED_ON]->(b:Method)-[:BASED_ON]->(a)
-        RETURN a.name AS method_a, b.name AS method_b
+        MATCH (a:Concept)-[:BASED_ON]->(b:Concept)-[:BASED_ON]->(a)
+        RETURN a.name AS concept_a, b.name AS concept_b
         LIMIT 50
     """
 
-    _CHECK_NO_EVIDENCE_METHOD = """
-        MATCH (p:Paper {id: $paper_id})-[r:USES_METHOD]->(m:Method)
+    _CHECK_NO_EVIDENCE_CONCEPT = """
+        MATCH (p:Paper {id: $paper_id})-[r:USES_CONCEPT]->(c:Concept)
         WHERE r.confidence > $confidence_threshold
           AND (r.evidence IS NULL OR r.evidence = '')
-        RETURN m.name AS name, r.confidence AS confidence
+        RETURN c.name AS name, r.confidence AS confidence
     """
 
-    _CHECK_NO_EVIDENCE_DATASET = """
-        MATCH (p:Paper {id: $paper_id})-[r:EVALUATES_ON]->(d:Dataset)
+    _CHECK_NO_EVIDENCE_EVIDENCE = """
+        MATCH (p:Paper {id: $paper_id})-[r:EVALUATES_ON]->(e:Evidence)
         WHERE r.confidence > $confidence_threshold
           AND (r.evidence IS NULL OR r.evidence = '')
-        RETURN d.name AS name, r.confidence AS confidence
+        RETURN e.name AS name, r.confidence AS confidence
     """
 
-    _CHECK_ORPHAN_METHOD = """
-        MATCH (m:Method)
-        WHERE NOT EXISTS { (p:Paper)-[:USES_METHOD]->(m) }
-        RETURN m.name AS name
+    # [v3-9] ORPHAN_CONCEPT thay ORPHAN_METHOD
+    _CHECK_ORPHAN_CONCEPT = """
+        MATCH (c:Concept)
+        WHERE NOT EXISTS { (p:Paper)-[:USES_CONCEPT]->(c) }
+        RETURN c.name AS name
         LIMIT 100
     """
 
-    _CHECK_ORPHAN_DATASET = """
-        MATCH (d:Dataset)
-        WHERE NOT EXISTS { (p:Paper)-[:EVALUATES_ON]->(d) }
-        RETURN d.name AS name
+    # [v3-9] ORPHAN_EVIDENCE thay ORPHAN_DATASET
+    _CHECK_ORPHAN_EVIDENCE = """
+        MATCH (e:Evidence)
+        WHERE NOT EXISTS { (p:Paper)-[:EVALUATES_ON]->(e) }
+        RETURN e.name AS name
         LIMIT 100
     """
 
-    _CHECK_LOW_CONFIDENCE_METHOD = """
-        MATCH (p:Paper {id: $paper_id})-[r:USES_METHOD]->(m:Method)
+    _CHECK_LOW_CONFIDENCE_CONCEPT = """
+        MATCH (p:Paper {id: $paper_id})-[r:USES_CONCEPT]->(c:Concept)
         WHERE r.confidence < $min_confidence
-        RETURN m.name AS name, r.confidence AS confidence
+        RETURN c.name AS name, r.confidence AS confidence
     """
 
     def __init__(
@@ -663,8 +550,8 @@ class ConsistencyChecker:
         min_confidence: float = 0.5,
         evidence_confidence_threshold: float = 0.75,
     ) -> None:
-        self._client = client
-        self._min_confidence = min_confidence
+        self._client            = client
+        self._min_confidence    = min_confidence
         self._evidence_threshold = evidence_confidence_threshold
 
     def check_consistency(
@@ -673,14 +560,8 @@ class ConsistencyChecker:
         check_orphans: bool = False,
     ) -> list[ConsistencyIssue]:
         """
-        Chạy tất cả consistency check cho paper_id.
-
-        Args:
-            paper_id:      ID của paper cần kiểm tra
-            check_orphans: Có kiểm tra orphan node không.
-                           Tắt mặc định vì orphan check là global query,
-                           tốn kém nếu gọi cho mỗi paper.
-                           Chỉ bật khi chạy maintenance job định kỳ.
+        Chạy tất cả check cho paper_id.
+        check_orphans=True chỉ dùng cho maintenance job (global query, tốn kém).
         """
         issues: list[ConsistencyIssue] = []
 
@@ -693,14 +574,14 @@ class ConsistencyChecker:
             issues.extend(self._check_orphans())
 
         if issues:
-            error_count   = sum(1 for i in issues if i.severity == "error")
-            warning_count = sum(1 for i in issues if i.severity == "warning")
+            errors   = sum(1 for i in issues if i.severity == "error")
+            warnings = sum(1 for i in issues if i.severity == "warning")
             logger.warning(
                 "ConsistencyChecker: paper_id=%s — %d issues (error=%d warning=%d)",
-                paper_id, len(issues), error_count, warning_count,
+                paper_id, len(issues), errors, warnings,
             )
         else:
-            logger.info("ConsistencyChecker: paper_id=%s — OK, no issues", paper_id)
+            logger.info("ConsistencyChecker: paper_id=%s — OK", paper_id)
 
         return issues
 
@@ -711,17 +592,18 @@ class ConsistencyChecker:
     def _check_duplicate_edges(self, paper_id: str) -> list[ConsistencyIssue]:
         issues = []
         params = {"paper_id": paper_id}
-
         for cypher, node_type in [
-            (self._CHECK_DUPLICATE_METHOD_EDGE,  "Method"),
-            (self._CHECK_DUPLICATE_DATASET_EDGE, "Dataset"),
+            (self._CHECK_DUPLICATE_CONCEPT_EDGE,  "Concept"),
+            (self._CHECK_DUPLICATE_EVIDENCE_EDGE, "Evidence"),
         ]:
             try:
-                rows = self._client.run_query(cypher, params)
-                for row in rows:
+                for row in self._client.run_query(cypher, params):
                     issues.append(ConsistencyIssue(
                         issue_type="DUPLICATE_EDGE",
-                        description=f"{node_type} '{row.get('name', '?')}' có {row.get('cnt', '?')} edge từ cùng paper",
+                        description=(
+                            f"{node_type} '{row.get('name','?')}' "
+                            f"có {row.get('cnt','?')} edge từ cùng paper"
+                        ),
                         node_type=node_type,
                         node_name=row.get("name", ""),
                         paper_id=paper_id,
@@ -729,23 +611,21 @@ class ConsistencyChecker:
                     ))
             except Exception:
                 logger.exception(
-                    "ConsistencyChecker._check_duplicate_edges: query thất bại node_type=%s",
-                    node_type,
+                    "ConsistencyChecker._check_duplicate_edges: node_type=%s", node_type
                 )
         return issues
 
     def _check_inverse_based_on(self) -> list[ConsistencyIssue]:
         issues = []
         try:
-            rows = self._client.run_query(self._CHECK_INVERSE_BASED_ON)
-            for row in rows:
+            for row in self._client.run_query(self._CHECK_INVERSE_BASED_ON):
                 issues.append(ConsistencyIssue(
                     issue_type="INVERSE_EDGE",
                     description=(
-                        f"Method BASED_ON cycle: '{row['method_a']}' ↔ '{row['method_b']}'"
+                        f"BASED_ON cycle: '{row['concept_a']}' ↔ '{row['concept_b']}'"
                     ),
-                    node_type="Method",
-                    node_name=row["method_a"],
+                    node_type="Concept",
+                    node_name=row["concept_a"],
                     severity="error",
                 ))
         except Exception:
@@ -754,23 +634,18 @@ class ConsistencyChecker:
 
     def _check_no_evidence(self, paper_id: str) -> list[ConsistencyIssue]:
         issues = []
-        params = {
-            "paper_id": paper_id,
-            "confidence_threshold": self._evidence_threshold,
-        }
-
+        params = {"paper_id": paper_id, "confidence_threshold": self._evidence_threshold}
         for cypher, node_type in [
-            (self._CHECK_NO_EVIDENCE_METHOD,  "Method"),
-            (self._CHECK_NO_EVIDENCE_DATASET, "Dataset"),
+            (self._CHECK_NO_EVIDENCE_CONCEPT,  "Concept"),
+            (self._CHECK_NO_EVIDENCE_EVIDENCE, "Evidence"),
         ]:
             try:
-                rows = self._client.run_query(cypher, params)
-                for row in rows:
+                for row in self._client.run_query(cypher, params):
                     issues.append(ConsistencyIssue(
                         issue_type="NO_EVIDENCE",
                         description=(
-                            f"{node_type} '{row.get('name', '?')}' "
-                            f"confidence={row.get('confidence', 0):.2f} nhưng không có evidence"
+                            f"{node_type} '{row.get('name','?')}' "
+                            f"confidence={row.get('confidence',0):.2f} không có evidence"
                         ),
                         node_type=node_type,
                         node_name=row.get("name", ""),
@@ -779,27 +654,22 @@ class ConsistencyChecker:
                     ))
             except Exception:
                 logger.exception(
-                    "ConsistencyChecker._check_no_evidence: query thất bại node_type=%s",
-                    node_type,
+                    "ConsistencyChecker._check_no_evidence: node_type=%s", node_type
                 )
         return issues
 
     def _check_low_confidence(self, paper_id: str) -> list[ConsistencyIssue]:
         issues = []
-        params = {
-            "paper_id": paper_id,
-            "min_confidence": self._min_confidence,
-        }
+        params = {"paper_id": paper_id, "min_confidence": self._min_confidence}
         try:
-            rows = self._client.run_query(self._CHECK_LOW_CONFIDENCE_METHOD, params)
-            for row in rows:
+            for row in self._client.run_query(self._CHECK_LOW_CONFIDENCE_CONCEPT, params):
                 issues.append(ConsistencyIssue(
                     issue_type="LOW_CONFIDENCE",
                     description=(
-                        f"Method '{row['name']}' confidence={row['confidence']:.2f} "
+                        f"Concept '{row['name']}' confidence={row['confidence']:.2f} "
                         f"< threshold={self._min_confidence}"
                     ),
-                    node_type="Method",
+                    node_type="Concept",
                     node_name=row["name"],
                     paper_id=paper_id,
                     severity="warning",
@@ -809,26 +679,24 @@ class ConsistencyChecker:
         return issues
 
     def _check_orphans(self) -> list[ConsistencyIssue]:
-        """Global query — chỉ gọi từ maintenance job, không phải per-paper."""
+        """Global query — chỉ gọi từ maintenance job."""
         issues = []
         for cypher, node_type, issue_type in [
-            (self._CHECK_ORPHAN_METHOD,  "Method",  "ORPHAN_METHOD"),
-            (self._CHECK_ORPHAN_DATASET, "Dataset", "ORPHAN_DATASET"),
+            (self._CHECK_ORPHAN_CONCEPT,  "Concept",  "ORPHAN_CONCEPT"),
+            (self._CHECK_ORPHAN_EVIDENCE, "Evidence", "ORPHAN_EVIDENCE"),
         ]:
             try:
-                rows = self._client.run_query(cypher)
-                for row in rows:
+                for row in self._client.run_query(cypher):
                     issues.append(ConsistencyIssue(
                         issue_type=issue_type,
-                        description=f"{node_type} '{row.get('name', '?')}' không có Paper nào link đến",
+                        description=f"{node_type} '{row.get('name','?')}' không có Paper link đến",
                         node_type=node_type,
                         node_name=row.get("name", ""),
                         severity="warning",
                     ))
             except Exception:
                 logger.exception(
-                    "ConsistencyChecker._check_orphans: query thất bại node_type=%s",
-                    node_type,
+                    "ConsistencyChecker._check_orphans: node_type=%s", node_type
                 )
         return issues
 
@@ -839,11 +707,10 @@ class ConsistencyChecker:
 
 @dataclass
 class UpdateReport:
-    """Tổng hợp kết quả sau run_all()."""
-    paper_id: str
-    merge_result: Optional[MergeResult] = None
-    provenance_updates: list[ProvenanceUpdate] = field(default_factory=list)
-    consistency_issues: list[ConsistencyIssue] = field(default_factory=list)
+    paper_id:             str
+    merge_result:         Optional[MergeResult]        = None
+    provenance_updates:   list[ProvenanceUpdate]       = field(default_factory=list)
+    consistency_issues:   list[ConsistencyIssue]       = field(default_factory=list)
 
     @property
     def has_errors(self) -> bool:
@@ -853,36 +720,27 @@ class UpdateReport:
     def summary(self) -> str:
         m = self.merge_result
         merge_str = (
-            f"methods_merged={m.methods_merged} "
-            f"datasets_merged={m.datasets_merged} "
+            f"concepts_merged={m.concepts_merged} "
+            f"evidences_merged={m.evidences_merged} "
             f"aliases={m.aliases_registered} "
             f"apoc={'yes' if m.apoc_available else 'no'}"
         ) if m else "merge=skipped"
+        errors = sum(1 for i in self.consistency_issues if i.severity == "error")
         return (
-            f"paper_id={self.paper_id} | "
-            f"{merge_str} | "
+            f"paper_id={self.paper_id} | {merge_str} | "
             f"provenance_updates={len(self.provenance_updates)} | "
-            f"issues={len(self.consistency_issues)} "
-            f"(errors={sum(1 for i in self.consistency_issues if i.severity == 'error')})"
+            f"issues={len(self.consistency_issues)} (errors={errors})"
         )
 
 
 class GraphUpdater:
     """
-    Orchestrator chạy đầy đủ update flow cho 1 paper sau build.
+    Orchestrator chạy đầy đủ update flow sau GraphBuilder.build().
 
-    Cách dùng:
-        updater = GraphUpdater(neo4j_client)
-
-        # Sau khi GraphBuilder.build() xong:
-        report = updater.run_all(paper_id, entities)
-        if report.has_errors:
-            logger.error(report.summary)
-
-    Hoặc từng bước:
-        updater.merge_entities(paper_id, entities)
-        updater.update_provenance(paper_id, entities)
-        issues = updater.check_consistency(paper_id)
+    Thứ tự bắt buộc:
+        1. merge_entities    — dedup node trước
+        2. update_provenance — sau merge để edge trỏ đúng canonical node
+        3. check_consistency — sau cùng để kiểm tra kết quả
     """
 
     def __init__(
@@ -891,18 +749,14 @@ class GraphUpdater:
         min_confidence: float = 0.5,
         evidence_confidence_threshold: float = 0.75,
     ) -> None:
-        self._client = client
-        self._merger   = EntityMerger(client)
-        self._prov     = ProvenanceUpdater(client)
-        self._checker  = ConsistencyChecker(
+        self._client  = client
+        self._merger  = EntityMerger(client)
+        self._prov    = ProvenanceUpdater(client)
+        self._checker = ConsistencyChecker(
             client,
             min_confidence=min_confidence,
             evidence_confidence_threshold=evidence_confidence_threshold,
         )
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def run_all(
         self,
@@ -910,13 +764,6 @@ class GraphUpdater:
         entities: ExtractedEntities,
         check_orphans: bool = False,
     ) -> UpdateReport:
-        """
-        Chạy đầy đủ: merge → provenance → consistency.
-        Thứ tự này là bắt buộc:
-            1. Merge trước để không có duplicate node
-            2. Provenance sau merge để edge trỏ đúng canonical node
-            3. Consistency sau cùng để kiểm tra kết quả
-        """
         report = UpdateReport(paper_id=paper_id)
         logger.info("GraphUpdater.run_all: start paper_id=%s", paper_id)
 
@@ -932,8 +779,7 @@ class GraphUpdater:
 
         try:
             report.consistency_issues = self._checker.check_consistency(
-                paper_id,
-                check_orphans=check_orphans,
+                paper_id, check_orphans=check_orphans,
             )
         except Exception:
             logger.exception("GraphUpdater: ConsistencyChecker thất bại paper_id=%s", paper_id)
@@ -941,45 +787,26 @@ class GraphUpdater:
         logger.info("GraphUpdater.run_all: done — %s", report.summary)
         return report
 
-    def merge_entities(
-        self,
-        paper_id: str,
-        entities: ExtractedEntities,
-    ) -> MergeResult:
-        """Chạy chỉ bước merge. Dùng khi cần rollback/retry riêng."""
+    def merge_entities(self, paper_id: str, entities: ExtractedEntities) -> MergeResult:
         return self._merger.merge_entities(paper_id, entities)
 
     def update_provenance(
-        self,
-        paper_id: str,
-        entities: ExtractedEntities,
+        self, paper_id: str, entities: ExtractedEntities
     ) -> list[ProvenanceUpdate]:
-        """Chạy chỉ bước provenance update."""
         return self._prov.update_provenance(paper_id, entities)
 
     def check_consistency(
-        self,
-        paper_id: str,
-        check_orphans: bool = False,
+        self, paper_id: str, check_orphans: bool = False
     ) -> list[ConsistencyIssue]:
-        """Chạy chỉ bước consistency check. Dùng cho maintenance job."""
         return self._checker.check_consistency(paper_id, check_orphans=check_orphans)
 
 
 # =============================================================================
-# BATCH UPDATER — chạy update cho nhiều paper
+# BATCH UPDATER
 # =============================================================================
 
 class BatchGraphUpdater:
-    """
-    Wrapper cho GraphUpdater để xử lý list paper.
-    Dùng trong maintenance job hoặc sau khi ingest batch mới.
-
-    Tự động:
-        - Bỏ qua paper chưa có status 'kg_built' (chưa build xong)
-        - Log summary tổng hợp sau khi xong
-        - Không dừng batch khi 1 paper lỗi
-    """
+    """Wrapper chạy GraphUpdater cho nhiều paper."""
 
     def __init__(
         self,
@@ -987,8 +814,8 @@ class BatchGraphUpdater:
         continue_on_error: bool = True,
         **updater_kwargs,
     ) -> None:
-        self._updater = GraphUpdater(client, **updater_kwargs)
-        self._client  = client
+        self._updater          = GraphUpdater(client, **updater_kwargs)
+        self._client           = client
         self._continue_on_error = continue_on_error
 
     def update_batch(
@@ -996,32 +823,20 @@ class BatchGraphUpdater:
         items: list[tuple[str, ExtractedEntities]],
         check_orphans: bool = False,
     ) -> list[UpdateReport]:
-        """
-        Chạy update cho list (paper_id, entities).
-
-        Args:
-            items:        list of (paper_id, entities)
-            check_orphans: có chạy orphan check không (tốn kém, chỉ bật định kỳ)
-        """
         reports: list[UpdateReport] = []
         success = failed = skipped = 0
 
         for paper_id, entities in items:
             existing = self._client.get_paper_by_id(paper_id)
             if not existing or existing.get("processing_status") != "kg_built":
-                logger.debug(
-                    "BatchGraphUpdater: skip paper_id=%s — chưa kg_built",
-                    paper_id,
-                )
+                logger.debug("BatchGraphUpdater: skip %s — chưa kg_built", paper_id)
                 skipped += 1
                 reports.append(UpdateReport(paper_id=paper_id))
                 continue
 
             try:
                 report = self._updater.run_all(
-                    paper_id,
-                    entities,
-                    check_orphans=check_orphans,
+                    paper_id, entities, check_orphans=check_orphans,
                 )
                 reports.append(report)
                 success += 1
