@@ -1149,7 +1149,9 @@ def create_extractor_from_env() -> EntityExtractor:
         MAX_SECTION_CHARS=4000         # độ dài tối đa mỗi chunk (default: 4000)
     """
     import os
-    backend = os.getenv("LLM_BACKEND", "anthropic").lower()
+    # KG extractor uses its own backend switch to avoid conflicting with
+    # global RAG backend (LLM_BACKEND=vllm/transformers).
+    backend = os.getenv("KG_LLM_BACKEND", os.getenv("LLM_BACKEND", "anthropic")).lower()
 
     if backend == "ollama":
         llm = OllamaBackend(

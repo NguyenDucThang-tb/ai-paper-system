@@ -1,0 +1,59 @@
+services:
+  neo4j:
+    image: neo4j:5.26
+    container_name: ai-paper-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/password}
+    volumes:
+      - neo4j_data:/data
+      - /home/nguyenducthang/neo4j.dump:/import/neo4j.dump:ro
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: ai-paper-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      - NEO4J_URI=${NEO4J_URI:-bolt://neo4j:7687}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/uploaded_files:/app/uploaded_files
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - neo4j
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://127.0.0.1:8000/api/v1}
+    container_name: ai-paper-frontend
+    restart: unless-stopped
+    environment:
+      - VITE_API_BASE_URL=${PUBLIC_API_BASE_URL:-http://127.0.0.1:8000/api/v1}
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  neo4j_data:

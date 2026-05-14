@@ -80,3 +80,12 @@ api_router.include_router(
     prefix="/internal/ai",
     tags=["internal-ai"]
 )
+
+# Backward-compatible alias for old internal demo scripts:
+# /api/v1/internal/demo/* (without /ai segment)
+api_router.include_router(
+    ai_internal.router,
+    prefix="/internal",
+    tags=["internal-ai-compat"],
+    include_in_schema=False,
+)

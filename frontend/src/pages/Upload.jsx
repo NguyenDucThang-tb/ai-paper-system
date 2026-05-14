@@ -14,8 +14,8 @@ import { api } from "@/lib/api";
 
 const steps = [
   ["Lưu file gốc", "Backend lưu PDF/DOCX/TXT để xem và download lại.", CheckCircle2],
-  ["Trích xuất nội dung", "Parser lấy text tiếng Việt và metadata cơ bản.", FileText],
-  ["Chunk + embedding", "AI worker tạo chunk và ghi embedding vào document_chunks.", Loader2],
+  ["Trích xuất nội dung", "Ingestion chạy nền ngay sau upload để lấy text và metadata.", FileText],
+  ["Sinh JSON + đồng bộ DB", "Pipeline tạo unified JSON và ghi metadata/artifact vào Neon.", Loader2],
   ["Sẵn sàng khai thác", "Có thể tóm tắt, hỏi đáp, KG, gợi ý và search.", CheckCircle2],
 ];
 
@@ -62,9 +62,8 @@ export default function UploadPage() {
           abstract: metadata.abstract || null,
         };
         await api.updateDocumentMetadata(response.document_id, payload);
-        await api.requestProcessing(response.document_id).catch(() => null);
       }
-      setMessage("Tải lên thành công. Metadata đã được lưu và job xử lý AI đã được yêu cầu.");
+      setMessage("Tải lên thành công. Ingestion đang chạy ngầm để sinh JSON và đồng bộ dữ liệu.");
       if (response.document_id) {
         setTimeout(() => navigate(`/document/${response.document_id}`), 600);
       }
@@ -184,7 +183,7 @@ export default function UploadPage() {
             <Card className="rounded-lg border-zinc-200 shadow-sm">
               <CardHeader>
                 <CardTitle>Pipeline sau upload</CardTitle>
-                <CardDescription>Những việc backend và AI worker cần hoàn thành.</CardDescription>
+                <CardDescription>Những việc backend ingestion tự động thực hiện sau upload.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
                 {steps.map(([title, desc, Icon], index) => (
@@ -229,7 +228,7 @@ export default function UploadPage() {
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
               <div className="flex items-start gap-3">
                 <AlertCircle className="mt-0.5 h-5 w-5" />
-                <p>Nếu file vừa upload chưa tóm tắt được ngay, hãy chờ worker tạo chunk, embedding và cập nhật trạng thái document.</p>
+                <p>Nếu file vừa upload chưa tóm tắt được ngay, hãy chờ ingestion hoàn tất và trạng thái tài liệu cập nhật.</p>
               </div>
             </div>
           </div>

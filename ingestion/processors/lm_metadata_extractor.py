@@ -1,11 +1,13 @@
 """
 lm_metadata_extractor.py
 ------------------------
-Extract metadata using local LLM (Ollama) natively inside the ingestion pipeline.
+Extract metadata via remote/local LLM endpoint inside the ingestion pipeline.
+Supports both Ollama-native and OpenAI-compatible endpoints.
 """
 
 import json
 import logging
+import os
 import re
 from dataclasses import replace
 from typing import Optional
@@ -18,11 +20,13 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
-DEFAULT_MODEL = "qwen2.5:7b"
-TEMPERATURE = 0.1
-TIMEOUT = 120  # seconds
+OLLAMA_CHAT_ENDPOINT = os.getenv("OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions")
+OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}{OLLAMA_CHAT_ENDPOINT}"
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
+TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))  # seconds
 MAX_INPUT_CHARS = 3000
 
 METADATA_PROMPT_TEMPLATE = """Bạn là trợ lý trích xuất metadata từ bài báo khoa học.
@@ -39,9 +43,10 @@ Trích xuất JSON với các trường sau từ đoạn text bài báo:
 
 Quy tắc:
 - Chỉ trả JSON, không giải thích.
-- Nếu bài báo có cả tiêu đề tiếng Việt và tiếng Anh, LUÔN ƯU TIÊN trích xuất tiêu đề tiếng Việt cho trường 'title'.
-- Nếu bài báo có cả tóm tắt tiếng Việt và tiếng Anh, LUÔN ƯU TIÊN tiếng Việt cho trường 'abstract'.
-- Nếu không tìm thấy trường nào, để giá trị null.
+- Mọi văn bản khoa học đều có 1 Tiêu đề chính. Hãy nhận diện đúng nó và gán cho 'title'. Lưu ý: Tiêu đề có thể kéo dài 2-4 dòng (ví dụ có các từ nối như "và...", "tại..."), PHẢI LẤY TOÀN BỘ các dòng đó, TUYỆT ĐỐI KHÔNG được tự ý rút gọn, tóm tắt hay bỏ sót bất kỳ chữ nào có trong bản gốc. Tiêu đề không bao giờ là tên tác giả (TS., ThS., GS.).
+- Nếu bài báo có tóm tắt, hãy ghi vào 'abstract'. Nếu không có đoạn tóm tắt rõ ràng, hãy lấy 1-2 câu đầu tiên mô tả chung làm tóm tắt.
+- authors: lấy tên người có danh xưng học vị (như TS., ThS., GS.,...).
+- Nếu không tìm thấy trường nào, hãy để giá trị null.
 - authors là mảng string, mỗi phần tử là tên đầy đủ 1 tác giả.
 - keywords là mảng string.
 - year là số nguyên (int), không phải string.
@@ -53,29 +58,43 @@ TEXT:
 # Core Logic
 # ---------------------------------------------------------------------------
 
+def _extract_model_ids(payload: dict) -> list[str]:
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [str(item.get("id", "")) for item in data if isinstance(item, dict)]
+    models = payload.get("models")
+    if isinstance(models, list):
+        return [str(item.get("name", "")) for item in models if isinstance(item, dict)]
+    return []
+
+
 def is_ollama_available(model: str = DEFAULT_MODEL) -> bool:
-    """Kiểm tra xem Ollama có đang chạy và model có sẵn không."""
+    """Kiểm tra endpoint LLM và model có sẵn không."""
     try:
         import requests
-        response = requests.get(
-            f"{OLLAMA_BASE_URL}/api/tags",
-            timeout=5,
-        )
-        if response.status_code != 200:
-            return False
-        tags = response.json()
-        models = [m.get("name", "") for m in tags.get("models", [])]
-        return any(model in m or m.startswith(model.split(":")[0]) for m in models)
+
+        # OpenAI-compatible first
+        response = requests.get(f"{OLLAMA_BASE_URL}/v1/models", timeout=5)
+        if response.status_code == 200:
+            model_ids = _extract_model_ids(response.json())
+            return any(model in m or m.startswith(model.split(":")[0]) for m in model_ids)
+
+        # Ollama native fallback
+        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        if response.status_code == 200:
+            model_ids = _extract_model_ids(response.json())
+            return any(model in m or m.startswith(model.split(":")[0]) for m in model_ids)
+        return False
     except Exception:
         return False
 
-def _generate(prompt: str, model: str = DEFAULT_MODEL) -> str:
-    """Gọi API generate của Ollama."""
+def _generate_ollama_native(prompt: str, model: str) -> str:
+    """Gọi Ollama native /api/generate."""
     try:
         import requests
     except ImportError:
         raise ImportError("requests not installed. Run: pip install requests")
-    
+
     payload = {
         "model": model,
         "prompt": prompt,
@@ -89,8 +108,45 @@ def _generate(prompt: str, model: str = DEFAULT_MODEL) -> str:
         response.raise_for_status()
         return response.json().get("response", "").strip()
     except Exception as e:
-        logger.debug(f"Ollama generate failed: {e}")
+        logger.debug(f"Ollama native generate failed: {e}")
         return ""
+
+
+def _generate_openai_compatible(prompt: str, model: str) -> str:
+    """Gọi OpenAI-compatible /v1/chat/completions."""
+    try:
+        import requests
+    except ImportError:
+        raise ImportError("requests not installed. Run: pip install requests")
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": TEMPERATURE,
+    }
+    try:
+        response = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=TIMEOUT)
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        message = (choices[0] or {}).get("message") or {}
+        return str(message.get("content") or "").strip()
+    except Exception as e:
+        logger.debug(f"OpenAI-compatible chat failed: {e}")
+        return ""
+
+
+def _generate(prompt: str, model: str = DEFAULT_MODEL) -> str:
+    """
+    Preferred path: OpenAI-compatible chat endpoint (works with your GPU server).
+    Fallback path: Ollama native generate endpoint.
+    """
+    text = _generate_openai_compatible(prompt, model=model)
+    if text:
+        return text
+    return _generate_ollama_native(prompt, model=model)
 
 def _parse_json_response(text: str) -> Optional[dict]:
     """Parse JSON trả về từ Ollama."""
@@ -133,6 +189,7 @@ def extract_metadata_via_lm(doc: UnifiedDocument, model: str = DEFAULT_MODEL) ->
     prompt = METADATA_PROMPT_TEMPLATE.format(text=truncated)
     
     raw_response = _generate(prompt, model)
+    logger.debug(f"Raw LM Response:\n{raw_response}")
     if not raw_response:
         return doc
         

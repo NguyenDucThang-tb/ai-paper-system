@@ -104,7 +104,7 @@ def build_token_response(db: Session, user, device_id: str | None = None):
 
 
 @router.post("/forgot-password/send-code")
-@router.post("/forgot-password")
+@router.post("/forgot-password", include_in_schema=False)
 async def send_forgot_password_code(payload: ForgotPasswordSendCodeRequest, db: Session = Depends(get_db)):
     try:
         email = str(payload.email).lower().strip()
@@ -159,7 +159,7 @@ async def send_forgot_password_code(payload: ForgotPasswordSendCodeRequest, db: 
 
 
 @router.post("/forgot-password/verify-code")
-@router.post("/verify-reset-code")
+@router.post("/verify-reset-code", include_in_schema=False)
 def verify_forgot_password_code(payload: ForgotPasswordVerifyCodeRequest, db: Session = Depends(get_db)):
     email = str(payload.email).lower().strip()
     user = get_user_by_email(db, email)
@@ -184,7 +184,7 @@ def verify_forgot_password_code(payload: ForgotPasswordVerifyCodeRequest, db: Se
 
 
 @router.post("/forgot-password/reset-password")
-@router.post("/reset-password")
+@router.post("/reset-password", include_in_schema=False)
 def reset_password_with_code(payload: ForgotPasswordResetRequest, db: Session = Depends(get_db)):
     email = str(payload.email).lower().strip()
     if len(payload.new_password) < 6:
@@ -384,7 +384,7 @@ async def start_google_login(
     return await google_client.authorize_redirect(request, get_google_redirect_uri())
 
 
-@router.get("/google/start")
+@router.get("/google/start", include_in_schema=False)
 async def start_google_login_legacy(request: Request):
     return await start_google_login(request)
 

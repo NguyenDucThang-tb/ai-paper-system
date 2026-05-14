@@ -42,8 +42,7 @@ export default function SearchPage() {
           })),
         );
       } else {
-        await api.requestSearch(query, 10);
-        setMessage("Backend đã tạo job search cho AI worker. Tạm thời hiển thị kết quả mẫu.");
+        setMessage("Không có kết quả phù hợp từ backend.");
         setApiResults(null);
       }
     } catch (err) {
@@ -58,7 +57,7 @@ export default function SearchPage() {
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4 lg:px-8">
           <div>
             <h1 className="text-xl font-semibold">Tìm kiếm RAG</h1>
-            <p className="text-sm text-zinc-500">Frontend gửi query đến backend/AI worker, kết quả trả về theo chunk và điểm liên quan.</p>
+            <p className="text-sm text-zinc-500">Frontend gửi query đến backend, kết quả semantic trả về theo chunk và điểm liên quan.</p>
           </div>
           <Badge>Semantic Search</Badge>
         </div>
@@ -115,13 +114,13 @@ export default function SearchPage() {
           <Card className="rounded-lg border-zinc-200 shadow-sm">
             <CardHeader>
               <CardTitle>Luồng tìm kiếm</CardTitle>
-              <CardDescription>Vai trò backend và AI worker.</CardDescription>
+              <CardDescription>Vai trò frontend và backend AI.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {[
                 ["Frontend", "Gửi query, limit và bộ lọc người dùng."],
-                ["Backend", "Kiểm tra quyền, tạo job search hoặc proxy kết quả."],
-                ["AI worker", "Tạo embedding query, truy xuất vector/graph, sắp xếp kết quả."],
+                ["Backend", "Kiểm tra quyền truy cập tài liệu và nạp artifact JSON."],
+                ["AI module", "Tạo embedding query, truy xuất vector semantic, sắp xếp kết quả."],
                 ["Kết quả", "Trả chunk, score, document_id và nguồn để mở tài liệu."],
               ].map(([title, desc]) => (
                 <div key={title} className="rounded-lg border border-zinc-200 p-4">

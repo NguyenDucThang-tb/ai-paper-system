@@ -1,14 +1,27 @@
-from fastapi import APIRouter, Depends, HTTPException
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+import tempfile
+from typing import Any
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import get_current_user
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.models.document import Document
-from app.models.document_chunk import DocumentChunk
 from app.models.document_graph import DocumentGraph
+from app.models.document_artifact import DocumentArtifact
 from app.models.document_job import DocumentJob
 from app.models.document_recommendation import DocumentRecommendation
 from app.models.document_summary import DocumentSummary
+from app.models.qa_history import QAHistory
+from app.services.ingestion_runner import run_ingestion_for_document
+from app.services.ai_summary_service import generate_summary_from_doc_json, normalize_summary_style
 from app.schemas.cms_ai import (
     GraphResponse,
     JobRequestResponse,
@@ -27,6 +40,18 @@ from app.schemas.cms_ai import (
 
 
 router = APIRouter()
+def _detect_project_root() -> Path:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "ingestion").exists() and (parent / "ai_module").exists():
+            return parent
+    # Fallback for container layout where app code lives under /app/app/*
+    return current.parents[4]
+
+
+PROJECT_ROOT = _detect_project_root()
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def get_owned_document(db: Session, document_id: int, user_id: int) -> Document:
@@ -46,13 +71,626 @@ def get_owned_document(db: Session, document_id: int, user_id: int) -> Document:
     return document
 
 
-def get_latest_summary(db: Session, document_id: int) -> DocumentSummary | None:
-    return (
-        db.query(DocumentSummary)
-        .filter(DocumentSummary.document_id == document_id)
-        .order_by(DocumentSummary.created_at.desc())
+def get_latest_summary(db: Session, document_id: int, summary_style: str | None = None) -> DocumentSummary | None:
+    try:
+        query = db.query(DocumentSummary).filter(DocumentSummary.document_id == document_id)
+        if summary_style:
+            query = query.filter(DocumentSummary.summary_style == normalize_summary_style(summary_style))
+        return query.order_by(DocumentSummary.created_at.desc(), DocumentSummary.id.desc()).first()
+    except ProgrammingError:
+        db.rollback()
+        return None
+
+
+def _load_document_artifact_json(db: Session, document_id: int) -> dict | None:
+    artifact = (
+        db.query(DocumentArtifact)
+        .filter(
+            DocumentArtifact.document_id == document_id,
+            DocumentArtifact.artifact_type == "unified_json",
+        )
+        .order_by(DocumentArtifact.created_at.desc())
         .first()
     )
+    if artifact is None:
+        return None
+    raw_uri = (artifact.uri or "").strip()
+    if not raw_uri:
+        return None
+    path = Path(raw_uri)
+    if not path.is_absolute():
+        # Prefer artifact paths relative to repository root.
+        candidate_paths = [
+            (PROJECT_ROOT / raw_uri).resolve(),
+            (PROJECT_ROOT / "backend" / raw_uri).resolve(),
+        ]
+        path = next((p for p in candidate_paths if p.exists()), candidate_paths[0])
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _fallback_summary_from_doc_json(doc_json: dict) -> str:
+    abstract = (doc_json.get("abstract") or "").strip()
+    if abstract:
+        return abstract
+    full_text = (doc_json.get("full_text") or "").strip()
+    if full_text:
+        return full_text[:1800]
+    sections = doc_json.get("sections") or []
+    content_parts = []
+    for sec in sections[:3]:
+        if isinstance(sec, dict):
+            content = (sec.get("content") or "").strip()
+            if content:
+                content_parts.append(content[:600])
+    return "\n\n".join(content_parts)[:1800]
+
+
+def _generate_summary_with_ai_module(doc_json: dict, summary_style: str = "academic") -> str:
+    try:
+        return generate_summary_from_doc_json(
+            doc_json=doc_json,
+            summary_style=normalize_summary_style(summary_style),
+            num_highlights=16,
+            chunk_highlights=4,
+        )
+    except Exception as ex:
+        raise RuntimeError(f"AI module summary failed: {ex}") from ex
+
+
+def _save_summary_row(
+    db: Session,
+    document_id: int,
+    summary_text: str,
+    summary_style: str = "academic",
+) -> None:
+    try:
+        style = normalize_summary_style(summary_style)
+        latest = get_latest_summary(db, document_id, style)
+        if latest:
+            latest.summary_style = style
+            latest.summary_short = summary_text[:400]
+            latest.summary_medium = summary_text
+            latest.summary_long = summary_text
+        else:
+            row = DocumentSummary(
+                document_id=document_id,
+                summary_style=style,
+                summary_short=summary_text[:400],
+                summary_medium=summary_text,
+                summary_long=summary_text,
+            )
+            db.add(row)
+        db.commit()
+    except SQLAlchemyError as ex:
+        db.rollback()
+        # Some deployments may not have the document_summaries table yet.
+        # Do not fail summary generation for this persistence issue.
+        msg = str(ex).lower()
+        if "document_summaries" in msg and "does not exist" in msg:
+            return
+        raise RuntimeError(f"Failed to save summary to database: {ex}") from ex
+
+
+def _extract_searchable_texts(doc_json: dict[str, Any]) -> list[dict[str, Any]]:
+    chunks = doc_json.get("chunks")
+    rows: list[dict[str, Any]] = []
+    if isinstance(chunks, list):
+        for i, chunk in enumerate(chunks):
+            if isinstance(chunk, dict):
+                text = str(chunk.get("text") or chunk.get("content") or "").strip()
+                if text:
+                    rows.append({"chunk_index": int(chunk.get("chunk_id", i)), "content": text})
+            elif isinstance(chunk, str):
+                text = chunk.strip()
+                if text:
+                    rows.append({"chunk_index": i, "content": text})
+        if rows:
+            return rows
+
+    sections = doc_json.get("sections")
+    if isinstance(sections, list):
+        for i, sec in enumerate(sections):
+            if not isinstance(sec, dict):
+                continue
+            content = str(sec.get("content") or "").strip()
+            if not content:
+                continue
+            name = str(sec.get("name") or "").strip()
+            text = f"{name}\n{content}" if name else content
+            rows.append({"chunk_index": int(sec.get("order", i)), "content": text})
+        if rows:
+            return rows
+
+    full_text = str(doc_json.get("full_text") or "").strip()
+    if full_text:
+        return [{"chunk_index": 0, "content": full_text}]
+    return []
+
+
+def _local_search_in_doc_json(doc_json: dict, query: str, limit: int) -> list[SearchResult]:
+    q = (query or "").strip().lower()
+    rows = _extract_searchable_texts(doc_json)
+    scored = []
+    for row in rows:
+        content = row["content"]
+        low = content.lower()
+        cnt = low.count(q) if q else 0
+        if cnt > 0:
+            scored.append((cnt, row["chunk_index"], content))
+    scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+    return [
+        SearchResult(
+            chunk_id=None,
+            document_id=0,
+            chunk_index=idx,
+            content=content[:2500],
+            score=float(score),
+            embedding_available=False,
+        )
+        for score, idx, content in scored[:limit]
+    ]
+
+
+def _semantic_search_in_doc_json(doc_json: dict, query: str, limit: int) -> list[SearchResult]:
+    try:
+        from ai_module.inference.inference_config import InferenceConfig
+        from ai_module.retrieval.vector_retriever import VectorRetriever
+
+        cfg = InferenceConfig()
+        retriever = VectorRetriever(cfg)
+        retriever.build([doc_json])
+        rows = retriever.retrieve(query, top_k=limit)
+        items: list[SearchResult] = []
+        for row in rows:
+            raw_chunk_id = row.get("chunk_id", 0)
+            try:
+                chunk_index = int(raw_chunk_id)
+            except Exception:
+                chunk_index = 0
+            items.append(
+                SearchResult(
+                    chunk_id=chunk_index,
+                    document_id=0,
+                    chunk_index=chunk_index,
+                    content=str(row.get("text") or "")[:2500],
+                    score=float(row.get("score") or 0.0),
+                    embedding_available=True,
+                )
+            )
+        if items:
+            return items
+    except Exception:
+        pass
+
+    return _local_search_in_doc_json(doc_json, query, limit)
+
+
+def _generate_qa_with_ai_module(doc_json: dict, question: str, top_k: int = 5) -> tuple[str, list[dict]]:
+    from ai_module.inference.inference_config import InferenceConfig
+    from ai_module.inference.llm_engine import LLMEngine
+    from ai_module.reasoning.context_builder import compact_sources, format_retrieved_context
+    from ai_module.reasoning.prompt_builder import rag_prompt
+    from ai_module.retrieval.fusion_retriever import FusionRetriever
+    from ai_module.retrieval.graph_retriever import create_graph_retriever_from_env
+    from ai_module.retrieval.vector_retriever import VectorRetriever
+
+    cfg = InferenceConfig()
+    retriever = VectorRetriever(cfg)
+    retriever.build([doc_json])
+    vector_rows = retriever.retrieve(question, top_k=max(top_k, cfg.top_k))
+    rows = vector_rows[:top_k]
+    try:
+        graph_retriever = create_graph_retriever_from_env()
+        fused = FusionRetriever(retriever, graph_retriever=graph_retriever)
+        rows = fused.retrieve(question, top_k=top_k)
+    except Exception:
+        # Graceful fallback to vector-only when Neo4j/graph service is unavailable.
+        rows = vector_rows[:top_k]
+    context = format_retrieved_context(rows)
+    prompt = rag_prompt(question=question, context=context)
+    llm = LLMEngine(cfg)
+    answer = llm.generate(prompt, max_new_tokens=cfg.max_new_tokens_qa).strip()
+    if not answer:
+        answer = "Không tìm thấy thông tin trong tài liệu."
+    sources = compact_sources(rows)
+    if not sources:
+        sources = [{"text": str(r.get("text") or "")[:300], "score": float(r.get("score") or 0.0)} for r in rows[:top_k]]
+    return answer, sources
+
+
+def _build_kg_with_ai_module(doc_json: dict) -> tuple[list[dict], list[dict]]:
+    from ai_module.kg.entity_extractor import create_extractor_from_env
+    from ai_module.kg.graph_builder import GraphBuilder
+    from ingestion.schema.document_schema import UnifiedDocument
+    from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
+
+    doc = UnifiedDocument(
+        title=str(doc_json.get("title") or "Unknown"),
+        authors=[str(a) for a in (doc_json.get("authors") or []) if str(a).strip()],
+        year=doc_json.get("year"),
+        journal=doc_json.get("journal"),
+        doi=doc_json.get("doi"),
+        keywords=[str(k) for k in (doc_json.get("keywords") or []) if str(k).strip()],
+        abstract=str(doc_json.get("abstract") or ""),
+        full_text=str(doc_json.get("full_text") or ""),
+        source_file=str(doc_json.get("file") or ""),
+        source_type=str(doc_json.get("source_type") or "pdf"),
+        language=doc_json.get("language"),
+    )
+    cfg = Neo4jConfig(
+        uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        username=os.getenv("NEO4J_USER", "neo4j"),
+        password=os.getenv("NEO4J_PASSWORD", "password"),
+        database=os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j")),
+    )
+    client = Neo4jClient(cfg)
+    client.connect()
+    try:
+        client.ensure_schema()
+        extractor = create_extractor_from_env()
+        entities = extractor.extract(doc)
+        builder = GraphBuilder(client)
+        paper_id = builder.build(doc, entities, relations=None, chunk_map=None)
+        rows = client.execute_read(
+            """
+            MATCH (p:Paper {id: $paper_id})-[r]-(n)
+            RETURN p, r, n
+            LIMIT 250
+            """,
+            {"paper_id": paper_id},
+        )
+    finally:
+        client.close()
+
+    node_map: dict[str, dict] = {}
+    edges: list[dict] = []
+    for row in rows:
+        for key in ("p", "n"):
+            nd = row.get(key)
+            if not nd:
+                continue
+            nid = str(nd.get("id") or getattr(nd, "id", ""))
+            if not nid or nid in node_map:
+                continue
+            labels = list(getattr(nd, "labels", []) or [])
+            node_map[nid] = {
+                "id": nid,
+                "label": str(nd.get("title") or nd.get("name") or nid),
+                "type": labels[0] if labels else "Node",
+            }
+        rel = row.get("r")
+        p = row.get("p")
+        n = row.get("n")
+        if rel and p and n:
+            edges.append(
+                {
+                    "source": str(p.get("id") or getattr(p, "id", "")),
+                    "target": str(n.get("id") or getattr(n, "id", "")),
+                    "relation": str(getattr(rel, "type", "")),
+                }
+            )
+    return list(node_map.values()), edges
+
+
+def _build_kg_from_neo4j(document: Document) -> tuple[list[dict], list[dict]]:
+    try:
+        from neo4j import GraphDatabase
+    except Exception:
+        return [], []
+
+    uri = os.getenv("NEO4J_URI", "").strip()
+    user = os.getenv("NEO4J_USER", "").strip()
+    password = os.getenv("NEO4J_PASSWORD", "").strip()
+    database = os.getenv("NEO4J_DATABASE", "neo4j").strip()
+    if not uri or not user or not password:
+        return [], []
+
+    title = ""
+    if document.metadata_record and document.metadata_record.title:
+        title = str(document.metadata_record.title).strip()
+    if not title:
+        title = str(document.filename or "").strip()
+    if not title:
+        return [], []
+
+    query = """
+    MATCH (p:Paper)
+    WHERE toLower(coalesce(p.title,'')) CONTAINS toLower($title)
+    OPTIONAL MATCH (p)-[r]-(n)
+    RETURN p, r, n
+    LIMIT 200
+    """
+
+    nodes_map: dict[str, dict] = {}
+    edges: list[dict] = []
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        with driver.session(database=database) as session:
+            rows = session.run(query, title=title)
+            for row in rows:
+                for key in ("p", "n"):
+                    nd = row.get(key)
+                    if not nd:
+                        continue
+                    nid = str(nd.get("id") or nd.id)
+                    if nid in nodes_map:
+                        continue
+                    labels = list(nd.labels) if hasattr(nd, "labels") else []
+                    nodes_map[nid] = {
+                        "id": nid,
+                        "label": str(nd.get("title") or nd.get("name") or nid),
+                        "type": labels[0] if labels else "Node",
+                    }
+                rel = row.get("r")
+                a = row.get("p")
+                b = row.get("n")
+                if rel and a and b:
+                    edges.append(
+                        {
+                            "source": str(a.get("id") or a.id),
+                            "target": str(b.get("id") or b.id),
+                            "relation": rel.type,
+                        }
+                    )
+    return list(nodes_map.values()), edges
+
+
+def _compute_ai_module_recommendations(
+    db: Session,
+    owner_id: int,
+    current_document: Document,
+    limit: int = 10,
+) -> list[RecommendationItem]:
+    from ai_module.inference.inference_config import InferenceConfig
+    from ai_module.recommendation.hybrid_recommender import (
+        HybridRecommender,
+        build_recommendation_index,
+    )
+    from ai_module.utils.document_schema import extract_document_text
+
+    docs = (
+        db.query(Document)
+        .filter(Document.user_id == owner_id, Document.is_deleted == False)
+        .all()
+    )
+    corpus: list[tuple[Document, dict]] = []
+    for doc in docs:
+        doc_json = _load_document_artifact_json(db, doc.id)
+        if doc_json:
+            corpus.append((doc, doc_json))
+    if len(corpus) < 2:
+        return []
+
+    query_parts: list[str] = []
+    current_meta = current_document.metadata_record
+    if current_meta:
+        if current_meta.title:
+            query_parts.append(str(current_meta.title))
+        if current_meta.abstract:
+            query_parts.append(str(current_meta.abstract))
+        if current_meta.keywords:
+            query_parts.extend([str(k) for k in current_meta.keywords if str(k).strip()])
+    query = " ".join(query_parts).strip() or current_document.filename
+
+    prepared_docs: list[dict] = []
+    file_to_document: dict[str, Document] = {}
+    for doc, doc_json in corpus:
+        file_key = f"document_{doc.id}"
+        prepared_docs.append({"file": file_key, "text": extract_document_text(doc_json)})
+        file_to_document[file_key] = doc
+
+    cfg = InferenceConfig()
+    recommender = HybridRecommender(cfg)
+    with tempfile.TemporaryDirectory(prefix="ai-paper-rec-") as tmpdir:
+        build_recommendation_index(prepared_docs, recommender.embedding, tmpdir)
+        raw = recommender.recommend(index_path=tmpdir, top_k=max(15, limit), query=query)
+
+    items: list[RecommendationItem] = []
+    for rec in raw.get("recommendations", []):
+        file_key = str(rec.get("file") or "")
+        target = file_to_document.get(file_key)
+        if not target or target.id == current_document.id:
+            continue
+        items.append(
+            RecommendationItem(
+                id=None,
+                recommended_document_id=target.id,
+                title=str(rec.get("title") or target.filename),
+                reason=f"hybrid semantic score={rec.get('score', 0)}",
+                score=float(rec.get("score") or 0.0),
+                source="ai_module_hybrid",
+                external_url=None,
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _compute_neo4j_graph_recommendations(
+    document: Document,
+    limit: int = 10,
+) -> list[RecommendationItem]:
+    from ai_module.recommendation.graph_recommender import create_graph_recommender_from_env
+    from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
+
+    cfg = Neo4jConfig(
+        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "bolt://neo4j-rec:7687")),
+        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "neo4j")),
+        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "password")),
+        database=os.getenv("NEO4J_REC_DATABASE", "neo4j"),
+    )
+    client = Neo4jClient(cfg)
+    client.connect()
+    try:
+        seed_paper_id: str | None = None
+        meta = document.metadata_record
+        doi = str(meta.doi).strip() if meta and meta.doi else ""
+        title = str(meta.title).strip() if meta and meta.title else ""
+
+        if doi:
+            rows = client.execute_read(
+                "MATCH (p:Paper {doi: $doi}) RETURN p.id AS id LIMIT 1",
+                {"doi": doi},
+            )
+            if rows:
+                seed_paper_id = str(rows[0]["id"])
+
+        if not seed_paper_id and title:
+            rows = []
+            try:
+                rows = client.execute_read(
+                    """
+                    CALL db.index.fulltext.queryNodes('paper_title_ft', $q)
+                    YIELD node, score
+                    RETURN node.id AS id, score
+                    ORDER BY score DESC
+                    LIMIT 1
+                    """,
+                    {"q": title},
+                )
+            except Exception:
+                rows = client.execute_read(
+                    """
+                    MATCH (p:Paper)
+                    WHERE toLower(trim(p.title)) = toLower(trim($title))
+                    RETURN p.id AS id
+                    LIMIT 1
+                    """,
+                    {"title": title},
+                )
+            if rows:
+                seed_paper_id = str(rows[0]["id"])
+
+        if not seed_paper_id:
+            rows = client.execute_read(
+                """
+                MATCH (p:Paper)
+                OPTIONAL MATCH (q:Paper)-[r]->(p)
+                WHERE type(r) IN ['CITES', 'CITED_BY', 'REFERENCES']
+                WITH p, count(*) AS cite_in
+                RETURN p.id AS id, p.title AS title, p.doi AS doi, cite_in
+                ORDER BY cite_in DESC, p.year DESC
+                LIMIT $k
+                """,
+                {"k": max(limit, 10)},
+            )
+            out: list[RecommendationItem] = []
+            for row in rows:
+                title_row = str(row.get("title") or row.get("id") or "Unknown paper")
+                doi_row = str(row.get("doi") or "").strip()
+                cite_in = int(row.get("cite_in") or 0)
+                out.append(
+                    RecommendationItem(
+                        id=None,
+                        recommended_document_id=None,
+                        title=title_row,
+                        reason=f"global graph fallback; citation_in={cite_in}",
+                        score=float(cite_in),
+                        source="neo4j_graph_dump",
+                        external_url=(f"https://doi.org/{doi_row}" if doi_row else None),
+                    )
+                )
+                if len(out) >= limit:
+                    break
+            return out
+
+        recommender = create_graph_recommender_from_env(client=client)
+        raw_recs = recommender.recommend(seed_paper_id, top_k=max(limit, 10))
+        items: list[RecommendationItem] = []
+        for rec in raw_recs:
+            p = client.get_paper_by_id(rec.paper_id) or {}
+            rec_title = str(p.get("title") or rec.paper_id)
+            doi_target = str(p.get("doi") or "").strip()
+            reason = (
+                f"graph score={rec.score:.3f}; "
+                f"concept={rec.breakdown.get('shared_concept', 0):.2f}, "
+                f"evidence={rec.breakdown.get('shared_evidence', 0):.2f}, "
+                f"citation={rec.breakdown.get('citation_network', 0):.2f}"
+            )
+            if rec.shared_concepts:
+                reason += f"; shared concepts={', '.join(rec.shared_concepts[:3])}"
+            items.append(
+                RecommendationItem(
+                    id=None,
+                    recommended_document_id=None,
+                    title=rec_title,
+                    reason=reason,
+                    score=float(rec.score or 0.0),
+                    source="neo4j_graph_dump",
+                    external_url=(f"https://doi.org/{doi_target}" if doi_target else None),
+                )
+            )
+            if len(items) >= limit:
+                break
+        return items
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _compute_metadata_recommendations(
+    db: Session,
+    owner_id: int,
+    current_document: Document,
+    limit: int = 10,
+) -> list[RecommendationItem]:
+    current_meta = current_document.metadata_record
+    current_keywords = {str(k).strip().lower() for k in (current_meta.keywords if current_meta else []) if str(k).strip()}
+    current_authors = {str(a).strip().lower() for a in (current_meta.authors if current_meta else []) if str(a).strip()}
+
+    others = (
+        db.query(Document)
+        .filter(
+            Document.user_id == owner_id,
+            Document.id != current_document.id,
+            Document.is_deleted == False,
+        )
+        .all()
+    )
+
+    items: list[RecommendationItem] = []
+    for doc in others:
+        meta = doc.metadata_record
+        if not meta:
+            continue
+        kws = {str(k).strip().lower() for k in (meta.keywords or []) if str(k).strip()}
+        aus = {str(a).strip().lower() for a in (meta.authors or []) if str(a).strip()}
+
+        kw_overlap = len(current_keywords & kws)
+        au_overlap = len(current_authors & aus)
+        score = 0.65 * kw_overlap + 0.35 * au_overlap
+        if score <= 0:
+            continue
+
+        reason_parts = []
+        if au_overlap:
+            reason_parts.append(f"shared authors={au_overlap}")
+        if kw_overlap:
+            reason_parts.append(f"shared keywords={kw_overlap}")
+        reason = ", ".join(reason_parts) if reason_parts else "metadata similarity"
+
+        title = meta.title or doc.filename
+        items.append(
+            RecommendationItem(
+                id=None,
+                recommended_document_id=doc.id,
+                title=title,
+                reason=reason,
+                score=float(score),
+                source="metadata",
+                external_url=None,
+            )
+        )
+
+    items.sort(key=lambda x: x.score or 0.0, reverse=True)
+    return items[:limit]
 
 
 def create_ai_job(
@@ -130,12 +768,14 @@ def request_document_processing(
         payload={"document_id": document.id},
     )
 
+    run_ingestion_for_document(document.id, use_lm=True)
+    db.refresh(job)
     return {
         "document_id": document.id,
         "job_id": job.id,
         "job_type": job.job_type,
         "status": job.status,
-        "message": "Document processing queued for AI worker",
+        "message": "Document processing executed",
     }
 
 
@@ -149,49 +789,233 @@ def request_summary(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    return _request_summary_by_style(
+        document_id=document_id,
+        level=payload.level,
+        summary_style=payload.summary_style,
+        db=db,
+        current_user=current_user,
+    )
+
+
+def _request_summary_by_style(
+    document_id: int,
+    level: str,
+    summary_style: str,
+    db: Session,
+    current_user,
+):
     document = get_owned_document(db, document_id, current_user.id)
     job = create_ai_job(
         db=db,
         document=document,
         user_id=current_user.id,
         job_type="summary",
-        payload={"level": payload.level},
+        payload={"level": level, "summary_style": summary_style},
     )
+
+    doc_json = _load_document_artifact_json(db, document.id)
+    if not doc_json:
+        job.status = "failed"
+        job.error_message = "No ingestion artifact found. Upload/processing must complete first."
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "document_id": document.id,
+            "question": f"summary:{level}:{summary_style}",
+            "status": "failed",
+            "job_id": job.id,
+            "message": "No artifact found for summary generation",
+            "summary_style": normalize_summary_style(summary_style),
+            "summary_text": None,
+        }
+
+    try:
+        text = _generate_summary_with_ai_module(doc_json, summary_style=summary_style)
+    except Exception as ex:
+        job.status = "failed"
+        job.error_message = str(ex)
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "document_id": document.id,
+            "question": f"summary:{level}:{summary_style}",
+            "status": "failed",
+            "job_id": job.id,
+            "message": str(ex),
+            "summary_style": normalize_summary_style(summary_style),
+            "summary_text": None,
+        }
+    if not text:
+        job.status = "failed"
+        job.error_message = "Summary generation returned empty output."
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "document_id": document.id,
+            "question": f"summary:{level}:{summary_style}",
+            "status": "failed",
+            "job_id": job.id,
+            "message": "Summary generation failed",
+            "summary_style": normalize_summary_style(summary_style),
+            "summary_text": None,
+        }
+
+    _save_summary_row(db, document.id, text, summary_style=summary_style)
+    job.status = "done"
+    job.result = {
+        "summary_preview": text[:500],
+        "summary_text": text,
+        "level": level,
+        "summary_style": summary_style,
+    }
+    job.error_message = None
+    job.completed_at = datetime.utcnow()
+    db.commit()
 
     return {
         "document_id": document.id,
-        "question": f"summary:{payload.level}",
-        "status": "accepted",
+        "question": f"summary:{level}:{summary_style}",
+        "status": "done",
         "job_id": job.id,
-        "message": "Summary request queued for AI service",
+        "message": "Summary generated",
+        "summary_style": normalize_summary_style(summary_style),
+        "summary_text": text,
     }
+
+
+@router.post(
+    "/documents/{document_id}/summary/request/academic",
+    response_model=QARequestResponse,
+)
+def request_summary_academic(
+    document_id: int,
+    payload: SummaryRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return _request_summary_by_style(
+        document_id=document_id,
+        level=payload.level,
+        summary_style="academic",
+        db=db,
+        current_user=current_user,
+    )
+
+
+@router.post(
+    "/documents/{document_id}/summary/request/semantic",
+    response_model=QARequestResponse,
+)
+def request_summary_semantic(
+    document_id: int,
+    payload: SummaryRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return _request_summary_by_style(
+        document_id=document_id,
+        level=payload.level,
+        summary_style="semantic",
+        db=db,
+        current_user=current_user,
+    )
+
+
+@router.post(
+    "/documents/{document_id}/summary/request/executive",
+    response_model=QARequestResponse,
+)
+def request_summary_executive(
+    document_id: int,
+    payload: SummaryRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return _request_summary_by_style(
+        document_id=document_id,
+        level=payload.level,
+        summary_style="executive",
+        db=db,
+        current_user=current_user,
+    )
 
 
 @router.get("/documents/{document_id}/summary", response_model=SummaryResponse)
 def get_summary(
     document_id: int,
+    summary_style: str | None = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     document = get_owned_document(db, document_id, current_user.id)
-    summary = get_latest_summary(db, document.id)
-
-    if not summary:
-        raise HTTPException(status_code=404, detail="Summary not found")
-
-    return {
-        "document_id": document.id,
-        "summary_short": summary.summary_short,
-        "summary_medium": summary.summary_medium,
-        "summary_long": summary.summary_long,
-        "created_at": summary.created_at,
-    }
+    normalized_style = normalize_summary_style(summary_style) if summary_style else None
+    summary = get_latest_summary(db, document.id, normalized_style)
+    if summary:
+        return {
+            "document_id": document.id,
+            "summary_short": summary.summary_short,
+            "summary_medium": summary.summary_medium,
+            "summary_long": summary.summary_long,
+            "created_at": summary.created_at,
+        }
+    latest_summary_job = (
+        db.query(DocumentJob)
+        .filter(
+            DocumentJob.document_id == document.id,
+            DocumentJob.job_type == "summary",
+            DocumentJob.status == "done",
+        )
+        .order_by(DocumentJob.completed_at.desc(), DocumentJob.id.desc())
+        .first()
+    )
+    if latest_summary_job and isinstance(latest_summary_job.result, dict):
+        if normalized_style:
+            result_style = normalize_summary_style(str(latest_summary_job.result.get("summary_style") or "academic"))
+            if result_style != normalized_style:
+                latest_summary_job = (
+                    db.query(DocumentJob)
+                    .filter(
+                        DocumentJob.document_id == document.id,
+                        DocumentJob.job_type == "summary",
+                        DocumentJob.status == "done",
+                    )
+                    .order_by(DocumentJob.completed_at.desc(), DocumentJob.id.desc())
+                    .all()
+                )
+                latest_job = next(
+                    (
+                        j
+                        for j in latest_summary_job
+                        if isinstance(j.result, dict)
+                        and normalize_summary_style(str(j.result.get("summary_style") or "academic")) == normalized_style
+                    ),
+                    None,
+                )
+                if latest_job is None:
+                    raise HTTPException(status_code=404, detail="Summary not found")
+                latest_summary_job = latest_job
+        text = str(
+            latest_summary_job.result.get("summary_text")
+            or latest_summary_job.result.get("summary_preview")
+            or ""
+        ).strip()
+        if text:
+            return {
+                "document_id": document.id,
+                "summary_short": text[:400],
+                "summary_medium": text,
+                "summary_long": text,
+                "created_at": latest_summary_job.completed_at,
+            }
+    raise HTTPException(status_code=404, detail="Summary not found")
 
 
 @router.post("/documents/{document_id}/qa/request", response_model=QARequestResponse)
 def request_qa_answer(
     document_id: int,
     payload: QARequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -204,13 +1028,93 @@ def request_qa_answer(
         payload={"question": payload.question},
     )
 
+    doc_json = _load_document_artifact_json(db, document.id)
+    if not doc_json:
+        job.status = "failed"
+        job.error_message = "No ingestion artifact found. Upload/processing must complete first."
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "document_id": document.id,
+            "question": payload.question,
+            "status": "failed",
+            "job_id": job.id,
+            "message": "No artifact found for QA generation",
+        }
+
+    job.status = "running"
+    job.last_started_at = datetime.utcnow()
+    db.commit()
+    background_tasks.add_task(
+        _run_qa_job_async,
+        job.id,
+        document.id,
+        current_user.id,
+        payload.question,
+    )
+
     return {
         "document_id": document.id,
         "question": payload.question,
-        "status": "accepted",
+        "status": "processing",
         "job_id": job.id,
-        "message": "Question accepted; AI service should answer via internal contract",
+        "message": "QA job accepted",
     }
+
+
+def _run_qa_job_async(job_id: int, document_id: int, user_id: int, question: str) -> None:
+    db = SessionLocal()
+    try:
+        document = (
+            db.query(Document)
+            .filter(
+                Document.id == document_id,
+                Document.user_id == user_id,
+                Document.is_deleted == False,
+            )
+            .first()
+        )
+        job = db.query(DocumentJob).filter(DocumentJob.id == job_id).first()
+        if not document or not job:
+            return
+
+        doc_json = _load_document_artifact_json(db, document.id)
+        if not doc_json:
+            job.status = "failed"
+            job.error_message = "No ingestion artifact found. Upload/processing must complete first."
+            job.completed_at = datetime.utcnow()
+            db.commit()
+            return
+
+        answer, sources = _generate_qa_with_ai_module(doc_json, question, top_k=5)
+        qa = QAHistory(
+            user_id=user_id,
+            document_id=document.id,
+            question=question,
+            answer=answer,
+            sources=json.dumps(sources, ensure_ascii=False),
+        )
+        db.add(qa)
+        db.flush()
+
+        job.status = "done"
+        job.result = {"qa_history_id": qa.id, "answer_preview": answer[:500], "sources": sources}
+        job.error_message = None
+        job.completed_at = datetime.utcnow()
+        db.commit()
+    except Exception as ex:
+        db.rollback()
+        try:
+            job = db.query(DocumentJob).filter(DocumentJob.id == job_id).first()
+            if job:
+                job.status = "failed"
+                job.error_message = str(ex)
+                job.completed_at = datetime.utcnow()
+                db.commit()
+        except Exception:
+            db.rollback()
+    finally:
+        db.close()
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
@@ -244,31 +1148,16 @@ def search_document(
     current_user=Depends(get_current_user),
 ):
     document = get_owned_document(db, document_id, current_user.id)
-
-    chunks = (
-        db.query(DocumentChunk)
-        .filter(
-            DocumentChunk.document_id == document.id,
-            DocumentChunk.content.ilike(f"%{payload.query}%"),
-        )
-        .order_by(DocumentChunk.chunk_index.asc())
-        .limit(payload.limit)
-        .all()
-    )
+    doc_json = _load_document_artifact_json(db, document.id)
+    if not doc_json:
+        return {"query": payload.query, "items": []}
+    items = _semantic_search_in_doc_json(doc_json, payload.query, payload.limit)
+    for item in items:
+        item.document_id = document.id
 
     return {
         "query": payload.query,
-        "items": [
-            SearchResult(
-                chunk_id=chunk.id,
-                document_id=chunk.document_id,
-                chunk_index=chunk.chunk_index,
-                content=chunk.content,
-                score=None,
-                embedding_available=chunk.embedding is not None,
-            )
-            for chunk in chunks
-        ],
+        "items": items,
     }
 
 
@@ -295,10 +1184,34 @@ def request_document_search(
         },
     )
 
+    doc_json = _load_document_artifact_json(db, document.id)
+    if not doc_json:
+        job.status = "failed"
+        job.error_message = "No ingestion artifact found. Upload/processing must complete first."
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "query": payload.query,
+            "status": "failed",
+            "message": "No artifact found for search",
+            "job_id": job.id,
+            "job_type": job.job_type,
+        }
+
+    items = _semantic_search_in_doc_json(doc_json, payload.query, payload.limit)
+    job.status = "done"
+    job.result = {
+        "query": payload.query,
+        "items": [it.dict() for it in items],
+    }
+    job.error_message = None
+    job.completed_at = datetime.utcnow()
+    db.commit()
+
     return {
         "query": payload.query,
-        "status": job.status,
-        "message": "Search request queued for AI worker",
+        "status": "done",
+        "message": "Search completed",
         "job_id": job.id,
         "job_type": job.job_type,
     }
@@ -310,32 +1223,27 @@ def search_my_documents(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    chunks = (
-        db.query(DocumentChunk)
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .filter(
-            Document.user_id == current_user.id,
-            Document.is_deleted == False,
-            DocumentChunk.content.ilike(f"%{payload.query}%"),
-        )
-        .order_by(Document.created_at.desc(), DocumentChunk.chunk_index.asc())
-        .limit(payload.limit)
+    docs = (
+        db.query(Document)
+        .filter(Document.user_id == current_user.id, Document.is_deleted == False)
+        .order_by(Document.created_at.desc())
+        .limit(30)
         .all()
     )
+    all_items: list[SearchResult] = []
+    for d in docs:
+        doc_json = _load_document_artifact_json(db, d.id)
+        if not doc_json:
+            continue
+        items = _semantic_search_in_doc_json(doc_json, payload.query, payload.limit)
+        for it in items:
+            it.document_id = d.id
+            all_items.append(it)
+    all_items.sort(key=lambda x: float(x.score or 0.0), reverse=True)
 
     return {
         "query": payload.query,
-        "items": [
-            SearchResult(
-                chunk_id=chunk.id,
-                document_id=chunk.document_id,
-                chunk_index=chunk.chunk_index,
-                content=chunk.content,
-                score=None,
-                embedding_available=chunk.embedding is not None,
-            )
-            for chunk in chunks
-        ],
+        "items": all_items[: payload.limit],
     }
 
 
@@ -356,10 +1264,37 @@ def request_search_my_documents(
         },
     )
 
+    docs = (
+        db.query(Document)
+        .filter(Document.user_id == current_user.id, Document.is_deleted == False)
+        .order_by(Document.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    all_items: list[SearchResult] = []
+    for d in docs:
+        doc_json = _load_document_artifact_json(db, d.id)
+        if not doc_json:
+            continue
+        items = _semantic_search_in_doc_json(doc_json, payload.query, payload.limit)
+        for it in items:
+            it.document_id = d.id
+            all_items.append(it)
+    all_items.sort(key=lambda x: float(x.score or 0.0), reverse=True)
+
+    job.status = "done"
+    job.result = {
+        "query": payload.query,
+        "items": [it.dict() for it in all_items[: payload.limit]],
+    }
+    job.error_message = None
+    job.completed_at = datetime.utcnow()
+    db.commit()
+
     return {
         "query": payload.query,
-        "status": job.status,
-        "message": "Search request queued for AI worker",
+        "status": "done",
+        "message": "Search completed",
         "job_id": job.id,
         "job_type": job.job_type,
     }
@@ -380,12 +1315,31 @@ def get_knowledge_graph(
     )
 
     if not graph:
-        return {
-            "document_id": document.id,
-            "nodes": [],
-            "edges": [],
-            "updated_at": None,
-        }
+        doc_json = _load_document_artifact_json(db, document.id)
+        nodes: list[dict] = []
+        edges: list[dict] = []
+        if doc_json:
+            try:
+                nodes, edges = _build_kg_with_ai_module(doc_json)
+            except Exception:
+                nodes, edges = [], []
+        if not nodes and not edges:
+            try:
+                nodes, edges = _build_kg_from_neo4j(document)
+            except Exception:
+                nodes, edges = [], []
+        if nodes or edges:
+            graph = DocumentGraph(document_id=document.id, nodes=nodes, edges=edges)
+            db.add(graph)
+            db.commit()
+            db.refresh(graph)
+        else:
+            return {
+                "document_id": document.id,
+                "nodes": [],
+                "edges": [],
+                "updated_at": None,
+            }
 
     return {
         "document_id": document.id,
@@ -406,25 +1360,70 @@ def get_recommendations(
 ):
     document = get_owned_document(db, document_id, current_user.id)
 
-    recommendations = (
-        db.query(DocumentRecommendation)
-        .filter(DocumentRecommendation.document_id == document.id)
-        .order_by(DocumentRecommendation.score.desc().nullslast())
-        .all()
-    )
+    try:
+        recommendations = (
+            db.query(DocumentRecommendation)
+            .filter(DocumentRecommendation.document_id == document.id)
+            .order_by(DocumentRecommendation.score.desc().nullslast())
+            .all()
+        )
+    except ProgrammingError:
+        db.rollback()
+        recommendations = []
 
+    if recommendations:
+        return {
+            "document_id": document.id,
+            "items": [
+                RecommendationItem(
+                    id=item.id,
+                    recommended_document_id=item.recommended_document_id,
+                    title=item.title,
+                    reason=item.reason,
+                    score=item.score,
+                    source=item.source,
+                    external_url=item.external_url,
+                )
+                for item in recommendations
+            ],
+        }
+
+    use_neo4j_recommender = os.getenv("ENABLE_NEO4J_GRAPH_RECOMMENDER", "true").lower() == "true"
+    use_heavy_recommender = os.getenv("ENABLE_AI_MODULE_RECOMMENDER", "false").lower() == "true"
+    items: list[RecommendationItem] = []
+    if use_neo4j_recommender:
+        try:
+            items = _compute_neo4j_graph_recommendations(document=document, limit=10)
+        except Exception:
+            items = []
+    if use_heavy_recommender:
+        if not items:
+            try:
+                items = _compute_ai_module_recommendations(db, current_user.id, document, limit=10)
+            except Exception:
+                items = []
+    if not items:
+        items = _compute_metadata_recommendations(db, current_user.id, document, limit=10)
+    else:
+        (
+            db.query(DocumentRecommendation)
+            .filter(DocumentRecommendation.document_id == document.id)
+            .delete()
+        )
+        for it in items:
+            db.add(
+                DocumentRecommendation(
+                    document_id=document.id,
+                    recommended_document_id=it.recommended_document_id,
+                    title=it.title,
+                    reason=it.reason,
+                    score=it.score,
+                    source=it.source,
+                    external_url=it.external_url,
+                )
+            )
+        db.commit()
     return {
         "document_id": document.id,
-        "items": [
-            RecommendationItem(
-                id=item.id,
-                recommended_document_id=item.recommended_document_id,
-                title=item.title,
-                reason=item.reason,
-                score=item.score,
-                source=item.source,
-                external_url=item.external_url,
-            )
-            for item in recommendations
-        ],
+        "items": items,
     }

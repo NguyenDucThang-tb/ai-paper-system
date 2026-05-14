@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class SummaryRequest(BaseModel):
     level: str = Field(default="medium", pattern="^(short|medium|long)$")
+    summary_style: str = Field(default="academic", pattern="^(academic|semantic|executive)$")
 
 
 class SummaryResponse(BaseModel):
@@ -25,6 +26,8 @@ class QARequestResponse(BaseModel):
     status: str
     message: str
     job_id: int | None = None
+    summary_style: str | None = None
+    summary_text: str | None = None
 
 
 class SearchRequest(BaseModel):

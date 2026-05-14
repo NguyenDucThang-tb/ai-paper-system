@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, Depends, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Depends, Form, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.db.session import get_db
 from app.api.deps import get_current_user
 from app.application.document.upload_document import handle_upload_document
+from app.services.ingestion_runner import run_ingestion_for_document
 
 from app.models.document import Document
 from app.models.document_metadata import DocumentMetadata
@@ -113,6 +114,7 @@ def resolve_uploaded_file(filename: str) -> Path | None:
 
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     workspace_id: int | None = Form(default=None),
     db: Session = Depends(get_db),
@@ -137,6 +139,8 @@ async def upload_document(
         user_id=current_user.id,
         workspace_id=workspace_id,
     )
+    # Run ingestion in background immediately after upload.
+    background_tasks.add_task(run_ingestion_for_document, document.id, True)
 
     return {
         "message": "Upload successful",

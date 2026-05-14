@@ -1,4 +1,24 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "https://triumphant-charisma-production-f2a9.up.railway.app/api/v1";
+function normalizeApiBase(raw) {
+  const fallback = "http://127.0.0.1:8000/api/v1";
+  if (!raw || typeof raw !== "string") return fallback;
+
+  let base = raw.trim().replace(/\/+$/, "");
+
+  // Common misconfig: pointing to an endpoint instead of API root.
+  base = base.replace(/\/auth\/google\/config$/i, "");
+
+  // Ensure expected backend prefix is present.
+  if (!/\/api\/v1$/i.test(base)) {
+    if (/\/api\/v1\//i.test(base)) {
+      base = base.replace(/(\/api\/v1).*/i, "$1");
+    } else {
+      base = `${base}/api/v1`;
+    }
+  }
+  return base;
+}
+
+const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
 
 function getToken() {
   return localStorage.getItem("access_token");
@@ -173,16 +193,36 @@ export const api = {
     link.click();
     URL.revokeObjectURL(url);
   },
-  getSummary: (documentId) => request(`/cms/documents/${documentId}/summary`),
+  getSummary: (documentId, summaryStyle = null) => {
+    const style = summaryStyle ? String(summaryStyle).toLowerCase() : "";
+    const query = style ? `?summary_style=${encodeURIComponent(style)}` : "";
+    return request(`/cms/documents/${documentId}/summary${query}`);
+  },
   requestProcessing: (documentId) =>
     request(`/cms/documents/${documentId}/process/request`, {
       method: "POST",
     }),
-  requestSummary: (documentId, level) =>
-    request(`/cms/documents/${documentId}/summary/request`, {
+  requestSummaryAcademic: (documentId, level = "medium") =>
+    request(`/cms/documents/${documentId}/summary/request/academic`, {
       method: "POST",
       body: JSON.stringify({ level }),
     }),
+  requestSummarySemantic: (documentId, level = "medium") =>
+    request(`/cms/documents/${documentId}/summary/request/semantic`, {
+      method: "POST",
+      body: JSON.stringify({ level }),
+    }),
+  requestSummaryExecutive: (documentId, level = "medium") =>
+    request(`/cms/documents/${documentId}/summary/request/executive`, {
+      method: "POST",
+      body: JSON.stringify({ level }),
+    }),
+  requestSummaryByStyle: (documentId, summaryStyle = "academic", level = "medium") => {
+    const style = String(summaryStyle || "academic").toLowerCase();
+    if (style === "semantic") return api.requestSummarySemantic(documentId, level);
+    if (style === "executive") return api.requestSummaryExecutive(documentId, level);
+    return api.requestSummaryAcademic(documentId, level);
+  },
   requestQuestion: (documentId, question) =>
     request(`/cms/documents/${documentId}/qa/request`, {
       method: "POST",
@@ -212,6 +252,24 @@ export const api = {
     request("/cms/search/request", {
       method: "POST",
       body: JSON.stringify({ query, limit }),
+    }),
+  internalDemoSummary: (payload) =>
+    request("/internal/ai/demo/summary", {
+      method: "POST",
+      headers: { "x-internal-token": import.meta.env.VITE_INTERNAL_API_TOKEN || "demo-internal-token" },
+      body: JSON.stringify(payload),
+    }),
+  internalDemoRagQa: (payload) =>
+    request("/internal/ai/demo/rag-qa", {
+      method: "POST",
+      headers: { "x-internal-token": import.meta.env.VITE_INTERNAL_API_TOKEN || "demo-internal-token" },
+      body: JSON.stringify(payload),
+    }),
+  internalDemoRagReset: (sessionId) =>
+    request("/internal/ai/demo/rag-qa/session/reset", {
+      method: "POST",
+      headers: { "x-internal-token": import.meta.env.VITE_INTERNAL_API_TOKEN || "demo-internal-token" },
+      body: JSON.stringify({ session_id: sessionId }),
     }),
   analytics: (groupBy = "year") =>
     request(`/cms/analytics/overview?group_by=${groupBy}`),

@@ -433,6 +433,14 @@ def _split_by_headings_regex(text: str) -> list[Section]:
         next_line = lines[i+1] if i + 1 < len(lines) else ""
 
         if _is_heading_line(stripped, next_line):
+            # Nếu 2 heading nằm sát nhau (không có nội dung ở giữa), gộp chúng lại
+            content_so_far = "\n".join(current_lines).strip()
+            if current_heading is not None and len(content_so_far) < 15:
+                current_heading = current_heading + " " + stripped
+                # Xóa current_lines để không chứa khoảng trắng thừa
+                current_lines = []
+                continue
+
             # Flush
             if current_heading is not None:
                 content = "\n".join(current_lines).strip()

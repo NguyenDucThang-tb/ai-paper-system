@@ -47,6 +47,8 @@ class Reference:
     title: Optional[str] = None
     authors: list[str] = field(default_factory=list)
     year: Optional[int] = None
+    # THÊM — để link sang UnifiedDocument nếu paper đó đã có trong hệ thống:
+    internal_doc_id: Optional[str] = None  # None = chưa có trong DB
 
 @dataclass
 class ChunkMeta:

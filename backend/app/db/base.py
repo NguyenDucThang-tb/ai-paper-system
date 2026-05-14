@@ -11,6 +11,7 @@ from app.models.document_summary import DocumentSummary
 from app.models.document_metadata import DocumentMetadata
 from app.models.document_graph import DocumentGraph
 from app.models.document_recommendation import DocumentRecommendation
+from app.models.document_artifact import DocumentArtifact
 from app.models.qa_history import QAHistory
 from app.models.password_reset_code import PasswordResetCode
 from app.models.login_event import LoginEvent

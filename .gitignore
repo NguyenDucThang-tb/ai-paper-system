@@ -31,3 +31,15 @@ env/
 
 # Upload files
 uploads/
+backend/uploaded_files/
+
+# Local/generated data and artifacts
+data/processed/
+data/multimodal/
+backend/data/
+ai_module/data/
+ai_module/models/
+ai_module/outputs/
+
+# Large package artifacts
+*.tar.gz

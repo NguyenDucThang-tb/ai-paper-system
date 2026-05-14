@@ -28,6 +28,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 import io
@@ -46,6 +47,29 @@ from ingestion.pipeline import run_pipeline, run_pipeline_batch, summarize_batch
 from ingestion.schema.document_schema import UnifiedDocument
 
 logger = logging.getLogger(__name__)
+
+
+def _load_env_file(path: Path) -> None:
+    """
+    Load .env style file into process environment without overriding existing vars.
+    Supported format: KEY=VALUE, ignores blank lines and comments.
+    """
+    if not path.exists():
+        return
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception as e:
+        logger.debug("Failed to load env file '%s': %s", path, e)
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +184,11 @@ def _save_result(doc: UnifiedDocument, output_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 def main():
+    # Auto-load backend env so ingestion can run without manual `export`.
+    # Priority: existing process env > backend/.env > project/.env
+    _load_env_file(PROJECT_ROOT / "backend" / ".env")
+    _load_env_file(PROJECT_ROOT / ".env")
+
     parser = argparse.ArgumentParser(
         description="Academic paper ingestion — batch processing script",
         formatter_class=argparse.RawDescriptionHelpFormatter,

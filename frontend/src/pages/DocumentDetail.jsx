@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   BookOpen,
@@ -23,7 +23,10 @@ import { mapApiDocument, mapApiDocuments } from "@/lib/documentMapper";
 const statusLabel = {
   uploaded: "Mới tải lên",
   processing: "Đang xử lý",
+  building_graph: "Đang xây dựng đồ thị",
   processed: "Sẵn sàng",
+  parsed: "Đã parse JSON",
+  indexed: "Sẵn sàng",
   failed: "Lỗi xử lý",
 };
 
@@ -57,6 +60,32 @@ function SourceItem({ doc, active, onSelect }) {
   );
 }
 
+function normalizeQaSources(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map((item) => (typeof item === "string" ? item : JSON.stringify(item)));
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!text) return [];
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.map((item) => (typeof item === "string" ? item : JSON.stringify(item)));
+      return [text];
+    } catch {
+      return [text];
+    }
+  }
+  return [JSON.stringify(raw)];
+}
+
+function mapQaRow(item) {
+  return {
+    question: item.question,
+    answer: item.answer,
+    sources: normalizeQaSources(item.sources),
+    pending: false,
+  };
+}
+
 export default function DocumentDetailPage() {
   const { id, workspaceId } = useParams();
   const navigate = useNavigate();
@@ -79,6 +108,8 @@ export default function DocumentDetailPage() {
   const [sources, setSources] = useState([]);
   const [qaItems, setQaItems] = useState([]);
   const [summary, setSummary] = useState(null);
+  const [summaryByStyle, setSummaryByStyle] = useState({});
+  const [summaryStyle, setSummaryStyle] = useState("academic");
   const [recommendations, setRecommendations] = useState([]);
   const [question, setQuestion] = useState("");
   const [sourceQuery, setSourceQuery] = useState("");
@@ -86,11 +117,110 @@ export default function DocumentDetailPage() {
   const [busy, setBusy] = useState("");
   const [loading, setLoading] = useState(true);
   const [recommendationMode, setRecommendationMode] = useState("author");
+  const [systemMessages, setSystemMessages] = useState([]);
+  const qaEndRef = useRef(null);
+  const activePollersRef = useRef(new Set());
+  const notifiedReadyRef = useRef(new Set());
+  const notifiedFailedRef = useRef(new Set());
+  const notifiedParsedRef = useRef(new Set());
+  const notifiedGraphRef = useRef(new Set());
 
   useEffect(() => {
     loadWorkspace();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, workspaceId]);
+
+  useEffect(() => {
+    return () => {
+      activePollersRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    qaEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [qaItems.length]);
+
+  function pushSystemMessage(content, variant = "info") {
+    setSystemMessages((prev) => {
+      const next = [...prev, { id: `${Date.now()}-${Math.random()}`, content, variant }];
+      return next.slice(-20);
+    });
+  }
+
+  function isReadyStatus(status) {
+    return ["processed", "indexed"].includes(String(status || "").toLowerCase());
+  }
+
+  function shouldPollStatus(status) {
+    return ["uploaded", "processing", "parsed"].includes(String(status || "").toLowerCase());
+  }
+
+  async function pollIngestionStatus(documentId, title) {
+    if (!documentId || activePollersRef.current.has(documentId)) return;
+    activePollersRef.current.add(documentId);
+    try {
+      let attempts = 0;
+      while (attempts < 120) {
+        const statusResponse = await api.getDocumentStatus(documentId);
+        const currentStatus = String(statusResponse?.status || "").toLowerCase();
+
+        setSources((prev) =>
+          prev.map((item) =>
+            String(item.id) === String(documentId) ? { ...item, status: currentStatus || item.status } : item,
+          ),
+        );
+        setDocument((prev) =>
+          String(prev?.id) === String(documentId) ? { ...prev, status: currentStatus || prev.status } : prev,
+        );
+
+        if (isReadyStatus(currentStatus)) {
+          if (!notifiedGraphRef.current.has(documentId)) {
+            notifiedGraphRef.current.add(documentId);
+            pushSystemMessage(`Hệ thống đang xử lý xây dựng đồ thị cho "${title}". Vui lòng chờ trước khi hỏi đáp.`, "info");
+          }
+          if (!notifiedReadyRef.current.has(documentId)) {
+            notifiedReadyRef.current.add(documentId);
+            pushSystemMessage(`Tài liệu "${title}" đã xử lý xong. Bạn có thể đặt câu hỏi và dùng AI ngay.`, "success");
+          }
+          await loadDocumentFeatures(documentId, summaryStyle, { includeRecommendations: false });
+          return;
+        }
+
+        if (currentStatus === "failed") {
+          if (!notifiedFailedRef.current.has(documentId)) {
+            notifiedFailedRef.current.add(documentId);
+            pushSystemMessage(`Xử lý tài liệu "${title}" thất bại. Vui lòng thử tải lại file.`, "error");
+          }
+          return;
+        }
+
+        if (currentStatus === "parsed" && !notifiedParsedRef.current.has(documentId)) {
+          notifiedParsedRef.current.add(documentId);
+          pushSystemMessage(`Tài liệu "${title}" đã ingestion xong và tạo JSON thành công.`, "success");
+          if (!notifiedGraphRef.current.has(documentId)) {
+            notifiedGraphRef.current.add(documentId);
+            pushSystemMessage(`Hệ thống đang xử lý xây dựng đồ thị cho "${title}". Vui lòng chờ trước khi hỏi đáp.`, "info");
+          }
+        }
+
+        if (!shouldPollStatus(currentStatus)) return;
+        attempts += 1;
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+    } catch {
+      pushSystemMessage(`Không theo dõi được tiến trình xử lý cho "${title}".`, "error");
+    } finally {
+      activePollersRef.current.delete(documentId);
+    }
+  }
+
+  useEffect(() => {
+    if (!document?.id) return;
+    if (shouldPollStatus(document.status)) {
+      pollIngestionStatus(document.id, document.title || document.filename || `#${document.id}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [document?.id, document?.status]);
 
   async function loadWorkspace() {
     setLoading(true);
@@ -120,39 +250,30 @@ export default function DocumentDetailPage() {
         });
         setQaItems([]);
         setSummary(null);
+        setSummaryByStyle({});
         setRecommendations([]);
         setLoading(false);
         return;
       }
 
       setDocument(currentDocument);
-      await loadDocumentFeatures(currentDocument.id);
       setLoading(false);
+      loadDocumentFeatures(currentDocument.id, summaryStyle);
       return;
     }
 
-    const [docsResponse, docResponse, qaResponse, summaryResponse, recResponse] =
+    const [docsResponse, docResponse] =
       await Promise.allSettled([
         api.listDocuments({ page_size: 50 }),
         api.getDocument(id),
-        api.getQaHistory(id),
-        api.getSummary(id),
-        api.getRecommendations(id),
       ]);
 
     if (docsResponse.status === "fulfilled") setSources(mapApiDocuments(docsResponse.value, []));
-    if (docResponse.status === "fulfilled") setDocument(mapApiDocument(docResponse.value));
-    if (qaResponse.status === "fulfilled" && qaResponse.value?.length) {
-      setQaItems(
-        qaResponse.value.map((item) => ({
-          question: item.question,
-          answer: item.answer,
-          source: item.sources || "Nguồn đã chọn",
-        })),
-      );
+    if (docResponse.status === "fulfilled") {
+      const nextDoc = mapApiDocument(docResponse.value);
+      setDocument(nextDoc);
+      loadDocumentFeatures(nextDoc.id, summaryStyle);
     }
-    if (summaryResponse.status === "fulfilled") setSummary(summaryResponse.value);
-    if (recResponse.status === "fulfilled") setRecommendations(recResponse.value.items || []);
 
     if (docResponse.status === "rejected") {
       setMessage("Không tải được tài liệu. Bạn cần đăng nhập lại hoặc kiểm tra backend.");
@@ -160,26 +281,28 @@ export default function DocumentDetailPage() {
     setLoading(false);
   }
 
-  async function loadDocumentFeatures(documentId) {
-    const [qaResponse, summaryResponse, recResponse] = await Promise.allSettled([
+  async function loadDocumentFeatures(documentId, style = "academic", options = {}) {
+    const { includeRecommendations = true } = options;
+    const [qaResponse, summaryResponse] = await Promise.allSettled([
       api.getQaHistory(documentId),
-      api.getSummary(documentId),
-      api.getRecommendations(documentId),
+      api.getSummary(documentId, style),
     ]);
 
     if (qaResponse.status === "fulfilled" && qaResponse.value?.length) {
-      setQaItems(
-        qaResponse.value.map((item) => ({
-          question: item.question,
-          answer: item.answer,
-          source: item.sources || "Nguồn đã chọn",
-        })),
-      );
+      setQaItems(qaResponse.value.map(mapQaRow));
     } else {
       setQaItems([]);
     }
-    setSummary(summaryResponse.status === "fulfilled" ? summaryResponse.value : null);
-    setRecommendations(recResponse.status === "fulfilled" ? recResponse.value.items || [] : []);
+    const summaryValue = summaryResponse.status === "fulfilled" ? summaryResponse.value : null;
+    setSummary(summaryValue);
+    setSummaryByStyle((prev) => ({ ...prev, [style]: summaryValue }));
+    if (includeRecommendations) {
+      api
+        .getRecommendations(documentId)
+        .then((res) => setRecommendations(res?.items || []))
+        .catch(() => {});
+    }
+    return { summary: summaryValue };
   }
 
   async function handleUploadSource(event) {
@@ -190,6 +313,11 @@ export default function DocumentDetailPage() {
     try {
       const response = await api.uploadDocument(file, workspaceId || null);
       setMessage("Đã tải nguồn mới lên backend.");
+      if (response?.document_id) {
+        const displayName = file?.name || `#${response.document_id}`;
+        pushSystemMessage(`Đã tải "${displayName}". Hệ thống đang xử lý tài liệu, vui lòng đợi trong giây lát...`, "info");
+        pollIngestionStatus(response.document_id, displayName);
+      }
       if (response.document_id) {
         if (workspaceId) {
           await loadWorkspace();
@@ -205,14 +333,54 @@ export default function DocumentDetailPage() {
     }
   }
 
-  async function handleRequestSummary(level) {
+  async function handleRequestSummary(level, summaryStyle = "academic") {
     if (!document.id) return;
-    setBusy(`summary-${level}`);
+    const style = String(summaryStyle || "academic").toLowerCase();
+    setSummaryStyle(style);
+    setBusy(`summary-${style}`);
     try {
-      const response = await api.requestSummary(document.id, level);
-      setMessage(`Đã tạo job tóm tắt #${response.job_id}.`);
+      const response = await api.requestSummaryByStyle(document.id, style, level);
+      const immediateText = String(response?.summary_text || "").trim();
+      if (immediateText) {
+        const nextSummary = {
+          document_id: document.id,
+          summary_short: immediateText.slice(0, 400),
+          summary_medium: immediateText,
+          summary_long: immediateText,
+          created_at: new Date().toISOString(),
+        };
+        setSummary(nextSummary);
+        setSummaryByStyle((prev) => ({ ...prev, [style]: nextSummary }));
+      }
+      const features = await loadDocumentFeatures(document.id, style, { includeRecommendations: false });
+      if (!features?.summary && response?.job_id) {
+        try {
+          const job = await api.getJobStatus(response.job_id);
+          const text = String(job?.result?.summary_text || job?.result?.summary_preview || "").trim();
+          if (text) {
+            const nextSummary = {
+              document_id: document.id,
+              summary_short: text.slice(0, 400),
+              summary_medium: text,
+              summary_long: text,
+              created_at: new Date().toISOString(),
+            };
+            setSummary(nextSummary);
+            setSummaryByStyle((prev) => ({ ...prev, [style]: nextSummary }));
+          }
+        } catch {
+          // keep current UI message if fallback fetch fails
+        }
+      }
+      setMessage(
+        response.status === "done"
+          ? `Đã tạo tóm tắt (${style}) xong.`
+          : response.status === "failed"
+            ? response.message || "Không tạo được tóm tắt."
+            : "Đã nhận yêu cầu tóm tắt.",
+      );
     } catch (err) {
-      setMessage(err.message || "Không tạo được job tóm tắt.");
+      setMessage(err.message || "Không tạo được tóm tắt.");
     } finally {
       setBusy("");
     }
@@ -222,20 +390,52 @@ export default function DocumentDetailPage() {
     const cleanQuestion = question.trim();
     if (!cleanQuestion) return;
     if (!document.id) return;
+    if (!isReadyStatus(document.status)) {
+      setMessage("Hệ thống đang xử lý xây dựng đồ thị. Vui lòng đợi tài liệu ở trạng thái Sẵn sàng rồi hỏi đáp.");
+      return;
+    }
     setBusy("qa");
+    const optimisticItem = {
+      question: cleanQuestion,
+      answer: "AI đang suy luận câu trả lời từ nội dung đã ingest...",
+      sources: [],
+      pending: true,
+    };
+    setQaItems((prev) => [optimisticItem, ...prev]);
     try {
       const response = await api.requestQuestion(document.id, cleanQuestion);
-      setMessage(`Đã gửi câu hỏi tới AI worker. Job #${response.job_id}.`);
-      setQaItems((items) => [
-        {
-          question: cleanQuestion,
-          answer: "Đang chờ AI worker xử lý. Tải lại lịch sử sau khi job hoàn tất.",
-          source: document.title,
-        },
-        ...items,
-      ]);
+      if (response?.job_id && response.status !== "done" && response.status !== "failed") {
+        const started = Date.now();
+        let finished = false;
+        while (!finished && Date.now() - started < 180000) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const job = await api.getJobStatus(response.job_id);
+          if (job?.status === "done") {
+            finished = true;
+            await loadDocumentFeatures(document.id, summaryStyle, { includeRecommendations: false });
+            setMessage("Đã trả lời câu hỏi.");
+          } else if (job?.status === "failed") {
+            finished = true;
+            setQaItems((prev) => prev.filter((item) => item !== optimisticItem));
+            setMessage(job?.error_message || "Không trả lời được câu hỏi.");
+          }
+        }
+        if (!finished) {
+          setMessage("Câu hỏi đang được xử lý, vui lòng đợi thêm.");
+        }
+      } else {
+        await loadDocumentFeatures(document.id, summaryStyle, { includeRecommendations: false });
+        setMessage(
+          response.status === "done"
+            ? "Đã trả lời câu hỏi."
+            : response.status === "failed"
+              ? response.message || "Không trả lời được câu hỏi."
+              : "Đã nhận câu hỏi.",
+        );
+      }
       setQuestion("");
     } catch (err) {
+      setQaItems((prev) => prev.filter((item) => item !== optimisticItem));
       setMessage(err.message || "Không gửi được câu hỏi.");
     } finally {
       setBusy("");
@@ -267,6 +467,8 @@ export default function DocumentDetailPage() {
   const activeRecommendations = groupedRecommendations[recommendationMode] || [];
   const sourceCount = sources.length;
   const notebookTitle = workspace?.title || document.title || "Untitled notebook";
+  const currentSummary = summaryByStyle[summaryStyle] || summary;
+  const summaryBusy = busy.startsWith("summary-");
 
   if (loading) {
     return (
@@ -345,7 +547,7 @@ export default function DocumentDetailPage() {
                   active={String(doc.id) === String(document.id)}
                   onSelect={(nextDocument) => {
                     setDocument(nextDocument);
-                    loadDocumentFeatures(nextDocument.id);
+                    loadDocumentFeatures(nextDocument.id, summaryStyle);
                   }}
                 />
               ))}
@@ -417,6 +619,20 @@ export default function DocumentDetailPage() {
               </p>
 
               <div className="mt-10 space-y-4">
+                {systemMessages.map((item) => (
+                  <div
+                    key={item.id}
+                    className={`rounded-lg border p-4 text-sm ${
+                      item.variant === "success"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : item.variant === "error"
+                          ? "border-rose-200 bg-rose-50 text-rose-800"
+                          : "border-sky-200 bg-sky-50 text-sky-800"
+                    }`}
+                  >
+                    {item.content}
+                  </div>
+                ))}
                 {qaItems.map((item) => (
                   <div key={`${item.question}-${item.answer}`} className="rounded-lg border border-zinc-200 p-5">
                     <div className="flex items-start gap-2">
@@ -424,9 +640,23 @@ export default function DocumentDetailPage() {
                       <p className="font-medium">{item.question}</p>
                     </div>
                     <p className="mt-3 text-sm leading-6 text-zinc-600">{item.answer}</p>
-                    <Badge variant="secondary" className="mt-3">Nguồn: {item.source}</Badge>
+                    {item.pending ? (
+                      <div className="mt-3 inline-flex items-center gap-2 text-xs text-zinc-500">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Đang xử lý
+                      </div>
+                    ) : item.sources?.length ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {item.sources.slice(0, 3).map((src) => (
+                          <Badge key={`${item.question}-${src}`} variant="secondary">Nguồn: {src}</Badge>
+                        ))}
+                      </div>
+                    ) : (
+                      <Badge variant="secondary" className="mt-3">Nguồn: Không có</Badge>
+                    )}
                   </div>
                 ))}
+                <div ref={qaEndRef} />
               </div>
             </div>
           </div>
@@ -437,7 +667,10 @@ export default function DocumentDetailPage() {
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") handleAskQuestion();
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    handleAskQuestion();
+                  }
                 }}
                 className="h-14 min-w-0 flex-1 px-4 text-base outline-none"
                 placeholder="Hỏi về tài liệu này..."
@@ -445,12 +678,12 @@ export default function DocumentDetailPage() {
               <span className="hidden text-sm text-zinc-600 sm:inline">
                 {document?.id ? "1 nguồn đang chọn" : "Chưa chọn nguồn"}
               </span>
-              <Button onClick={handleAskQuestion} disabled={busy === "qa" || !document.id} size="icon" className="h-12 w-12 rounded-full bg-zinc-200 text-zinc-700 hover:bg-zinc-300">
+              <Button onClick={handleAskQuestion} disabled={busy === "qa" || !document.id || !isReadyStatus(document.status)} size="icon" className="h-12 w-12 rounded-full bg-zinc-200 text-zinc-700 hover:bg-zinc-300">
                 {busy === "qa" ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
               </Button>
             </div>
             <p className="mt-3 text-center text-xs text-zinc-500">
-              Câu hỏi được gửi tới `POST /api/v1/cms/documents/{id}/qa/request`; kết quả thật lấy từ lịch sử Q&A sau khi AI worker ghi về backend.
+              Câu hỏi được gửi tới {`POST /api/v1/cms/documents/${document?.id || "<id>"}/qa/request`}; backend gọi trực tiếp AI module và lưu vào lịch sử Q&A.
             </p>
           </div>
         </section>
@@ -469,15 +702,29 @@ export default function DocumentDetailPage() {
                   <p className="text-sm font-medium">Tóm tắt</p>
                 </div>
                 <Button
-                  onClick={() => handleRequestSummary("medium")}
-                  disabled={!document.id || busy === "summary-medium"}
+                  onClick={() => handleRequestSummary("medium", "academic")}
+                  disabled={!document.id || summaryBusy}
                   className="rounded-full bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-800"
                 >
-                  {busy === "summary-medium" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Tạo tóm tắt"}
+                  {busy === "summary-academic" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Academic"}
+                </Button>
+                <Button
+                  onClick={() => handleRequestSummary("medium", "semantic")}
+                  disabled={!document.id || summaryBusy}
+                  className="rounded-full bg-zinc-700 px-4 text-sm font-medium text-white hover:bg-zinc-600"
+                >
+                  {busy === "summary-semantic" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Semantic"}
+                </Button>
+                <Button
+                  onClick={() => handleRequestSummary("medium", "executive")}
+                  disabled={!document.id || summaryBusy}
+                  className="rounded-full bg-zinc-600 px-4 text-sm font-medium text-white hover:bg-zinc-500"
+                >
+                  {busy === "summary-executive" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Executive"}
                 </Button>
               </div>
               <p className="mt-3 text-sm leading-7 text-zinc-600">
-                {summary?.summary_medium || summary?.summary_short || summary?.summary_long || "Chưa có tóm tắt trong backend. Hãy bấm Tóm tắt để tạo nội dung đầu ra."}
+                {currentSummary?.summary_medium || currentSummary?.summary_short || currentSummary?.summary_long || "Chưa có tóm tắt trong backend. Hãy bấm Tóm tắt để tạo nội dung đầu ra."}
               </p>
             </section>
           </div>

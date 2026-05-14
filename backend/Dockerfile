@@ -9,10 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY . /app
+COPY backend/ /app/
+COPY ingestion/ /app/ingestion/
+COPY ai_module/ /app/ai_module/
+COPY storage/ /app/storage/
+COPY data/ /app/data/
 
 EXPOSE 8000
 
