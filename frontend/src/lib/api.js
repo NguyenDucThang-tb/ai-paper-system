@@ -1,5 +1,5 @@
 function normalizeApiBase(raw) {
-  const fallback = "http://127.0.0.1:8000/api/v1";
+  const fallback = "VITE_API_BASE_URL=https://triumphant-charisma-production-f2a9.up.railway.app/api/v1";
   if (!raw || typeof raw !== "string") return fallback;
 
   let base = raw.trim().replace(/\/+$/, "");
