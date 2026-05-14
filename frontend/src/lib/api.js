@@ -18,7 +18,7 @@ function normalizeApiBase(raw) {
   return base;
 }
 
-const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
+const API_BASE = normalizeApiBase("https://triumphant-charisma-production-f2a9.up.railway.app");
 
 function getToken() {
   return localStorage.getItem("access_token");
