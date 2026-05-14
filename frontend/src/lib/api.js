@@ -1,5 +1,5 @@
 function normalizeApiBase(raw) {
-  const fallback = "VITE_API_BASE_URL=https://triumphant-charisma-production-f2a9.up.railway.app/api/v1";
+  const fallback = "https://triumphant-charisma-production-f2a9.up.railway.app/api/v1";
   if (!raw || typeof raw !== "string") return fallback;
 
   let base = raw.trim().replace(/\/+$/, "");
@@ -18,7 +18,7 @@ function normalizeApiBase(raw) {
   return base;
 }
 
-const API_BASE = normalizeApiBase("https://triumphant-charisma-production-f2a9.up.railway.app");
+const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
 
 function getToken() {
   return localStorage.getItem("access_token");
