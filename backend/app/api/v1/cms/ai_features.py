@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import logging
 from datetime import datetime
 from pathlib import Path
 import tempfile
@@ -40,6 +41,7 @@ from app.schemas.cms_ai import (
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 def _detect_project_root() -> Path:
     current = Path(__file__).resolve()
     for parent in current.parents:
@@ -522,23 +524,34 @@ def _compute_neo4j_graph_recommendations(
         uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "bolt://neo4j-rec:7687")),
         username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "neo4j")),
         password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "password")),
-        database=os.getenv("NEO4J_REC_DATABASE", "neo4j"),
+        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")),
     )
-    client = Neo4jClient(cfg)
-    client.connect()
-    try:
-        seed_paper_id: str | None = None
-        meta = document.metadata_record
-        doi = str(meta.doi).strip() if meta and meta.doi else ""
-        title = str(meta.title).strip() if meta and meta.title else ""
+    meta = document.metadata_record
+    title = str(meta.title).strip() if meta and meta.title else str(document.filename or "").strip()
+    doi = str(meta.doi).strip() if meta and meta.doi else ""
 
-        if doi:
+    def _resolve_seed_paper_id() -> str | None:
+        seed_paper_id: str | None = None
+
+        if doi or title:
             rows = client.execute_read(
-                "MATCH (p:Paper {doi: $doi}) RETURN p.id AS id LIMIT 1",
-                {"doi": doi},
+                """
+                MATCH (p:Paper)
+                WHERE ($doi <> '' AND p.doi = $doi)
+                   OR ($title <> '' AND p.title = $title)
+                RETURN p.id AS id
+                LIMIT 1
+                """,
+                {"doi": doi, "title": title},
             )
             if rows:
                 seed_paper_id = str(rows[0]["id"])
+        return seed_paper_id
+
+    client = Neo4jClient(cfg)
+    client.connect()
+    try:
+        seed_paper_id = _resolve_seed_paper_id()
 
         if not seed_paper_id and title:
             rows = []
@@ -567,50 +580,45 @@ def _compute_neo4j_graph_recommendations(
                 seed_paper_id = str(rows[0]["id"])
 
         if not seed_paper_id:
-            rows = client.execute_read(
-                """
-                MATCH (p:Paper)
-                OPTIONAL MATCH (q:Paper)-[r]->(p)
-                WHERE type(r) IN ['CITES', 'CITED_BY', 'REFERENCES']
-                WITH p, count(*) AS cite_in
-                RETURN p.id AS id, p.title AS title, p.doi AS doi, cite_in
-                ORDER BY cite_in DESC, p.year DESC
-                LIMIT $k
-                """,
-                {"k": max(limit, 10)},
-            )
-            out: list[RecommendationItem] = []
-            for row in rows:
-                title_row = str(row.get("title") or row.get("id") or "Unknown paper")
-                doi_row = str(row.get("doi") or "").strip()
-                cite_in = int(row.get("cite_in") or 0)
-                out.append(
-                    RecommendationItem(
-                        id=None,
-                        recommended_document_id=None,
-                        title=title_row,
-                        reason=f"global graph fallback; citation_in={cite_in}",
-                        score=float(cite_in),
-                        source="neo4j_graph_dump",
-                        external_url=(f"https://doi.org/{doi_row}" if doi_row else None),
-                    )
-                )
-                if len(out) >= limit:
-                    break
-            return out
+            # Do not fallback to global graph leaderboard.
+            # Recommendation must be conditioned by the current uploaded document.
+            return []
 
-        recommender = create_graph_recommender_from_env(client=client)
-        raw_recs = recommender.recommend(seed_paper_id, top_k=max(limit, 10))
+        prev_env = {
+            "GRAPH_REC_W_CONCEPT": os.getenv("GRAPH_REC_W_CONCEPT"),
+            "GRAPH_REC_W_EVIDENCE": os.getenv("GRAPH_REC_W_EVIDENCE"),
+            "GRAPH_REC_W_CITATION": os.getenv("GRAPH_REC_W_CITATION"),
+            "GRAPH_REC_W_HIERARCHY": os.getenv("GRAPH_REC_W_HIERARCHY"),
+            "GRAPH_REC_W_AUTHOR": os.getenv("GRAPH_REC_W_AUTHOR"),
+            "GRAPH_REC_AUTHOR_FILTER_METHOD": os.getenv("GRAPH_REC_AUTHOR_FILTER_METHOD"),
+        }
+        try:
+            os.environ["GRAPH_REC_W_CONCEPT"] = "0.0"
+            os.environ["GRAPH_REC_W_EVIDENCE"] = "0.0"
+            os.environ["GRAPH_REC_W_CITATION"] = "0.0"
+            os.environ["GRAPH_REC_W_HIERARCHY"] = "0.0"
+            os.environ["GRAPH_REC_W_AUTHOR"] = "1.0"
+            os.environ["GRAPH_REC_AUTHOR_FILTER_METHOD"] = "true"
+            recommender = create_graph_recommender_from_env(client=client)
+            raw_recs = recommender.recommend(seed_paper_id, top_k=max(limit, 10))
+        finally:
+            for key, value in prev_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         items: list[RecommendationItem] = []
         for rec in raw_recs:
-            p = client.get_paper_by_id(rec.paper_id) or {}
-            rec_title = str(p.get("title") or rec.paper_id)
+            rows = client.execute_read(
+                "MATCH (p:Paper {id: $pid}) RETURN p.title AS title, p.doi AS doi LIMIT 1",
+                {"pid": rec.paper_id},
+            )
+            p = rows[0] if rows else {}
+            rec_title = str(rec.title or p.get("title") or rec.paper_id)
             doi_target = str(p.get("doi") or "").strip()
             reason = (
-                f"graph score={rec.score:.3f}; "
-                f"concept={rec.breakdown.get('shared_concept', 0):.2f}, "
-                f"evidence={rec.breakdown.get('shared_evidence', 0):.2f}, "
-                f"citation={rec.breakdown.get('citation_network', 0):.2f}"
+                f"author-network score={rec.score:.3f}; "
+                f"authors={rec.breakdown.get('author_network', 0):.2f}"
             )
             if rec.shared_concepts:
                 reason += f"; shared concepts={', '.join(rec.shared_concepts[:3])}"
@@ -618,6 +626,7 @@ def _compute_neo4j_graph_recommendations(
                 RecommendationItem(
                     id=None,
                     recommended_document_id=None,
+                    recommendation_type="method",
                     title=rec_title,
                     reason=reason,
                     score=float(rec.score or 0.0),
@@ -628,6 +637,207 @@ def _compute_neo4j_graph_recommendations(
             if len(items) >= limit:
                 break
         return items
+    except Exception:
+        logger.exception("neo4j graph recommendations failed: document_id=%s", document.id)
+        return []
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _compute_neo4j_author_recommendations(
+    document: Document,
+    doc_json: dict | None = None,
+    limit: int = 10,
+) -> list[RecommendationItem]:
+    from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
+
+    cfg = Neo4jConfig(
+        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "bolt://neo4j-rec:7687")),
+        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "neo4j")),
+        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "password")),
+        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")),
+    )
+    client = Neo4jClient(cfg)
+    client.connect()
+    try:
+        meta = document.metadata_record
+        doc_json = doc_json or {}
+        title = str(meta.title).strip() if meta and meta.title else str(document.filename or "").strip()
+        doi = str(meta.doi).strip() if meta and meta.doi else ""
+        meta_authors = [str(a).strip() for a in ((meta.authors if meta else []) or []) if str(a).strip()]
+        entity_authors, _ = _extract_recommendation_entities(doc_json, document)
+        authors = list(dict.fromkeys([*entity_authors, *meta_authors]))[:20]
+        if not title and not doi and not authors:
+            return []
+
+        rows = []
+        if authors:
+            rows = client.execute_read(
+                """
+                UNWIND $authors AS author_q
+                MATCH (a:Author)-[:WROTE]->(p:Paper)
+                WHERE toLower(a.name) CONTAINS toLower(author_q)
+                   OR toLower(author_q) CONTAINS toLower(a.name)
+                RETURN DISTINCT p.id AS id, p.title AS title, p.doi AS doi, a.name AS matched_author
+                LIMIT $k
+                """,
+                {"authors": authors[:10], "k": max(limit, 10)},
+            )
+
+        if not rows:
+            return []
+
+        items: list[RecommendationItem] = []
+        for row in rows:
+            rec_title = str(row.get("title") or row.get("id") or "Unknown paper")
+            doi_target = str(row.get("doi") or "").strip()
+            matched_author = str(row.get("matched_author") or "").strip()
+            reason = f"Cùng tác giả '{matched_author}'" if matched_author else "Cùng tác giả"
+            items.append(
+                RecommendationItem(
+                    id=None,
+                    recommended_document_id=None,
+                    recommendation_type="author",
+                    title=rec_title,
+                    reason=reason,
+                    score=0.8,
+                    source="neo4j_author_graph",
+                    external_url=(f"https://doi.org/{doi_target}" if doi_target else None),
+                )
+            )
+            if len(items) >= limit:
+                break
+        return items
+    except Exception:
+        logger.exception("neo4j author recommendations failed: document_id=%s", document.id)
+        return []
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _extract_recommendation_entities(doc_json: dict, document: Document | None = None) -> tuple[list[str], list[str]]:
+    """
+    Extract author + method-like entities from ingested artifact.
+    Priority:
+    1) Entity extractor output (author + concept categories)
+    2) Metadata fallback (authors + keywords)
+    """
+    doc_json = doc_json or {}
+    authors_out: list[str] = []
+    methods_out: list[str] = []
+
+    entities = doc_json.get("entities") or {}
+    if isinstance(entities, dict):
+        raw_authors = entities.get("authors") or []
+        for row in raw_authors:
+            if isinstance(row, dict):
+                name = str(row.get("name") or "").strip()
+            else:
+                name = str(row or "").strip()
+            if name:
+                authors_out.append(name)
+
+        raw_concepts = entities.get("concepts") or entities.get("methods") or []
+        for row in raw_concepts:
+            if isinstance(row, dict):
+                name = str(row.get("name") or "").strip()
+                category = str(row.get("category") or "").strip().lower()
+                if name and (not category or category == "method"):
+                    methods_out.append(name)
+            else:
+                name = str(row or "").strip()
+                if name:
+                    methods_out.append(name)
+
+    if not authors_out:
+        authors_out = [str(a).strip() for a in (doc_json.get("authors") or []) if str(a).strip()]
+    if not methods_out:
+        methods_out = [str(k).strip() for k in (doc_json.get("keywords") or []) if str(k).strip()]
+    if document and document.metadata_record:
+        meta = document.metadata_record
+        if not authors_out:
+            authors_out = [str(a).strip() for a in ((meta.authors or []) if meta else []) if str(a).strip()]
+        if not methods_out:
+            methods_out = [str(k).strip() for k in ((meta.keywords or []) if meta else []) if str(k).strip()]
+
+    dedup = lambda xs: list(dict.fromkeys([x for x in xs if x]))
+    return dedup(authors_out)[:20], dedup(methods_out)[:30]
+
+
+def _compute_neo4j_entity_recommendations(
+    document: Document,
+    doc_json: dict | None,
+    limit: int = 10,
+) -> list[RecommendationItem]:
+    from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
+
+    authors, methods = _extract_recommendation_entities(doc_json, document)
+    if not authors or not methods:
+        return []
+
+    cfg = Neo4jConfig(
+        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "bolt://neo4j-rec:7687")),
+        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "neo4j")),
+        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "password")),
+        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")),
+    )
+    client = Neo4jClient(cfg)
+    client.connect()
+    try:
+        items: list[RecommendationItem] = []
+        rows = client.execute_read(
+            """
+            MATCH (a:Author)-[:WROTE]->(p:Paper)
+            WHERE a.name IN $authors
+            MATCH (p)-[:USES_CONCEPT]->(c:Concept)
+            WHERE toLower(coalesce(c.category, ''))='method' AND c.name IN $methods
+            RETURN DISTINCT
+                p.id AS id,
+                p.title AS title,
+                p.doi AS doi,
+                a.name AS matched_author,
+                c.name AS matched_method
+            LIMIT $k
+            """,
+            {"authors": authors[:20], "methods": methods[:30], "k": max(limit, 10)},
+        )
+        for row in rows:
+            title = str(row.get("title") or row.get("id") or "Unknown paper")
+            doi = str(row.get("doi") or "").strip()
+            matched_author = str(row.get("matched_author") or "").strip()
+            matched_method = str(row.get("matched_method") or "").strip()
+            rec_type = "author" if matched_author else "method"
+            items.append(
+                RecommendationItem(
+                    id=None,
+                    recommended_document_id=None,
+                    recommendation_type=rec_type,
+                    title=title,
+                    reason=f"Cùng tác giả '{matched_author}' và method '{matched_method}'",
+                    score=1.0,
+                    source="neo4j_entity",
+                    external_url=(f"https://doi.org/{doi}" if doi else None),
+                )
+            )
+
+        seen: set[str] = set()
+        dedup_items: list[RecommendationItem] = []
+        for it in items:
+            k = str(it.title or "").strip().lower()
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            dedup_items.append(it)
+        return dedup_items[:limit]
+    except Exception:
+        logger.exception("neo4j entity recommendations failed: document_id=%s", document.id)
+        return []
     finally:
         try:
             client.close()
@@ -681,6 +891,7 @@ def _compute_metadata_recommendations(
             RecommendationItem(
                 id=None,
                 recommended_document_id=doc.id,
+                recommendation_type=("author" if au_overlap >= kw_overlap else "method"),
                 title=title,
                 reason=reason,
                 score=float(score),
@@ -1359,6 +1570,7 @@ def get_recommendations(
     current_user=Depends(get_current_user),
 ):
     document = get_owned_document(db, document_id, current_user.id)
+    doc_json = _load_document_artifact_json(db, document.id)
 
     try:
         recommendations = (
@@ -1378,6 +1590,7 @@ def get_recommendations(
                 RecommendationItem(
                     id=item.id,
                     recommended_document_id=item.recommended_document_id,
+                    recommendation_type=str(getattr(item, "recommendation_type", None) or "method"),
                     title=item.title,
                     reason=item.reason,
                     score=item.score,
@@ -1388,28 +1601,50 @@ def get_recommendations(
             ],
         }
 
-    use_neo4j_recommender = os.getenv("ENABLE_NEO4J_GRAPH_RECOMMENDER", "true").lower() == "true"
-    use_heavy_recommender = os.getenv("ENABLE_AI_MODULE_RECOMMENDER", "false").lower() == "true"
     items: list[RecommendationItem] = []
-    if use_neo4j_recommender:
+    try:
+        items = _compute_neo4j_entity_recommendations(document=document, doc_json=doc_json, limit=10)
+    except Exception:
+        logger.exception("entity recommendations failed: document_id=%s", document.id)
+        items = []
+
+    if not items:
+        try:
+            items = _compute_neo4j_author_recommendations(document=document, doc_json=doc_json, limit=10)
+        except Exception:
+            logger.exception("author recommendations failed: document_id=%s", document.id)
+            items = []
+
+    if not items:
         try:
             items = _compute_neo4j_graph_recommendations(document=document, limit=10)
+            for it in items:
+                if not getattr(it, "recommendation_type", None):
+                    it.recommendation_type = "method"
         except Exception:
+            logger.exception("graph recommendations failed: document_id=%s", document.id)
             items = []
-    if use_heavy_recommender:
-        if not items:
-            try:
-                items = _compute_ai_module_recommendations(db, current_user.id, document, limit=10)
-            except Exception:
-                items = []
+
     if not items:
         items = _compute_metadata_recommendations(db, current_user.id, document, limit=10)
-    else:
-        (
-            db.query(DocumentRecommendation)
-            .filter(DocumentRecommendation.document_id == document.id)
-            .delete()
+        for it in items:
+            if not getattr(it, "recommendation_type", None):
+                it.recommendation_type = "author"
+
+    seen: dict[tuple[str, str], RecommendationItem] = {}
+    for it in items:
+        key = (
+            str(it.title or "").strip().lower(),
+            str(getattr(it, "recommendation_type", "method") or "method").strip().lower(),
         )
+        if key not in seen or float(it.score or 0.0) > float(seen[key].score or 0.0):
+            seen[key] = it
+    items = sorted(seen.values(), key=lambda x: float(x.score or 0.0), reverse=True)
+
+    try:
+        db.query(DocumentRecommendation).filter(
+            DocumentRecommendation.document_id == document.id
+        ).delete()
         for it in items:
             db.add(
                 DocumentRecommendation(
@@ -1419,11 +1654,12 @@ def get_recommendations(
                     reason=it.reason,
                     score=it.score,
                     source=it.source,
+                    recommendation_type=str(getattr(it, "recommendation_type", None) or "method"),
                     external_url=it.external_url,
                 )
             )
         db.commit()
-    return {
-        "document_id": document.id,
-        "items": items,
-    }
+    except Exception:
+        db.rollback()
+
+    return {"document_id": document.id, "items": items}

@@ -6,7 +6,7 @@ import heroImage from "@/assets/hero.png";
 import { Button } from "@/components/ui/button";
 
 export function AuthHeroShell({
-  brand = "AI PaperLM",
+  brand = "PaperMind",
   title,
   subtitle,
   supporting,

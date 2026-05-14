@@ -92,6 +92,7 @@ class GraphResponse(GraphPayload):
 class RecommendationItem(BaseModel):
     id: int | None = None
     recommended_document_id: int | None = None
+    recommendation_type: str = "method"
     title: str
     reason: str | None = None
     score: float | None = None

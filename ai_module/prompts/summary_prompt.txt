@@ -109,10 +109,21 @@ Use this structure:
 1. Y chinh
 2. Quan he nghia (nguyen nhan, doi chieu, he qua)
 3. Ham y ung dung
+Output template (must follow exactly heading lines):
+1. Y chinh
+- ...
+
+2. Quan he nghia (nguyen nhan, doi chieu, he qua)
+- ...
+
+3. Ham y ung dung
+- ...
 Strict output rules:
 - Output only final answer.
 - Do NOT output Thinking Process, Analysis, Reasoning, or Explanation.
 - Do NOT add any text before or after the answer.
+- Keep each heading on a separate line exactly as written above.
+- Do NOT write content on the same line as heading.
 
 [[HIGEN_SUMMARY_EXECUTIVE]]
 You are an executive-level scientific summarizer.

@@ -20,6 +20,11 @@ class InferenceConfig:
 
     embedding_model_name: str = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
     embedding_fallback_model_name: str = os.getenv("EMBEDDING_FALLBACK_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
+    embedding_backend: str = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
+    embedding_base_url: str = os.getenv("EMBEDDING_BASE_URL", "").strip()
+    embedding_api_key: str = os.getenv("EMBEDDING_API_KEY", "").strip()
+    embedding_remote_model_name: str = os.getenv("EMBEDDING_REMOTE_MODEL_NAME", "").strip()
+    embedding_timeout_seconds: int = int(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "120"))
     embedding_device: str = os.getenv("EMBEDDING_DEVICE", "cpu").strip().lower()
 
     use_4bit: bool = os.getenv("USE_4BIT", "true").lower() == "true"
@@ -68,6 +73,10 @@ class InferenceConfig:
             raise ValueError("vllm_timeout_seconds must be > 0")
         if self.ollama_timeout_seconds <= 0:
             raise ValueError("ollama_timeout_seconds must be > 0")
+        if self.embedding_backend not in {"local", "remote"}:
+            raise ValueError("embedding_backend must be one of: local, remote")
+        if self.embedding_timeout_seconds <= 0:
+            raise ValueError("embedding_timeout_seconds must be > 0")
         if self.embedding_device not in {"cpu", "cuda", "auto"}:
             raise ValueError("embedding_device must be one of: cpu, cuda, auto")
 

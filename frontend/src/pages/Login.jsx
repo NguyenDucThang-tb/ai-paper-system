@@ -107,7 +107,7 @@ export default function LoginPage() {
 
       <div className="relative z-10 w-full max-w-md rounded-[28px] border border-white/65 bg-white/90 p-8 shadow-[0_24px_80px_rgba(76,81,132,0.16)] backdrop-blur">
         <div className="text-center">
-          <p className="text-4xl font-black tracking-tight text-zinc-950 sm:text-5xl">AI PaperLM</p>
+          <p className="text-4xl font-black tracking-tight text-zinc-950 sm:text-5xl">PaperMind</p>
           <p className="mt-2 text-sm font-semibold uppercase tracking-[0.24em] text-indigo-600">
             Đăng nhập
           </p>

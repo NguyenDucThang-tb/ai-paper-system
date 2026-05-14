@@ -32,31 +32,67 @@ function NotebookMark({ compact = false }) {
       <div className={`${compact ? "h-10 w-10" : "h-9 w-9"} flex items-center justify-center rounded-full bg-black text-white`}>
         <FileQuestion className={compact ? "h-5 w-5" : "h-4 w-4"} />
       </div>
-      {!compact && <span className="text-2xl font-semibold tracking-normal">AI PaperLM</span>}
+      {!compact && <span className="text-2xl font-semibold tracking-normal">PaperMind</span>}
     </div>
   );
 }
 
-function NotebookCard({ workspace, index }) {
+function NotebookCard({ workspace, index, menuOpen, onToggleMenu, onRename, onDelete }) {
   const style = notebookStyles[index % notebookStyles.length];
   const Icon = style.icon;
 
   return (
-    <Link
-      to={`/workspace/${workspace.id}`}
-      className={`group min-h-[210px] rounded-lg p-7 text-left transition hover:-translate-y-0.5 hover:shadow-md ${style.accent}`}
-    >
+    <div className={`group relative min-h-[210px] rounded-lg p-7 text-left transition hover:-translate-y-0.5 hover:shadow-md ${style.accent}`}>
       <div className="flex items-start justify-between">
         <Icon className={`h-12 w-12 ${style.iconColor}`} strokeWidth={1.8} />
-        <MoreVertical className="h-5 w-5 text-zinc-500" />
+        <div className="relative">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onToggleMenu(workspace.id);
+            }}
+            className="rounded p-1 text-zinc-500 hover:bg-white/60"
+          >
+            <MoreVertical className="h-5 w-5" />
+          </button>
+          {menuOpen ? (
+            <div className="absolute right-0 z-20 mt-1 w-36 rounded-md border border-zinc-200 bg-white p-1 shadow">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onRename(workspace);
+                }}
+                className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-zinc-100"
+              >
+                Sửa tên
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onDelete(workspace);
+                }}
+                className="block w-full rounded px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+              >
+                Xóa sổ tay
+              </button>
+            </div>
+          ) : null}
+        </div>
       </div>
-      <h3 className="mt-10 line-clamp-2 text-2xl font-medium leading-tight text-zinc-950">
+      <Link to={`/workspace/${workspace.id}`} className="absolute inset-0 z-10" aria-label={workspace.title || "Sổ tay"} />
+      <h3 className="relative z-[11] mt-10 line-clamp-2 text-2xl font-medium leading-tight text-zinc-950">
         {workspace.title || "Untitled notebook"}
       </h3>
-      <p className="mt-5 text-sm text-zinc-600">
+      <p className="relative z-[11] mt-5 text-sm text-zinc-600">
         {workspace.updated || "5 thg 5, 2026"} · {workspace.documentCount || 0} nguồn
       </p>
-    </Link>
+    </div>
   );
 }
 
@@ -66,6 +102,7 @@ export default function UserHomePage() {
   const [query, setQuery] = useState("");
   const [apiNote, setApiNote] = useState("");
   const [creating, setCreating] = useState(false);
+  const [menuWorkspaceId, setMenuWorkspaceId] = useState(null);
   const creatingRef = useRef(false);
 
   useEffect(() => {
@@ -101,6 +138,42 @@ export default function UserHomePage() {
     } finally {
       setCreating(false);
       creatingRef.current = false;
+    }
+  }
+
+  async function refreshWorkspaces() {
+    try {
+      const response = await api.listWorkspaces({ page_size: 12 });
+      setWorkspaces(mapApiWorkspaces(response, []));
+    } catch {
+      // Keep current list if refresh fails.
+    }
+  }
+
+  async function handleRenameWorkspace(workspace) {
+    setMenuWorkspaceId(null);
+    const current = String(workspace?.title || "").trim();
+    const nextTitle = window.prompt("Nhập tên sổ tay mới", current);
+    if (!nextTitle) return;
+    const clean = String(nextTitle).trim();
+    if (!clean || clean === current) return;
+    try {
+      await api.updateWorkspace(workspace.id, { title: clean });
+      await refreshWorkspaces();
+    } catch (err) {
+      setApiNote(err.message || "Không đổi được tên sổ tay.");
+    }
+  }
+
+  async function handleDeleteWorkspace(workspace) {
+    setMenuWorkspaceId(null);
+    const ok = window.confirm(`Xóa sổ tay \"${workspace?.title || workspace?.id}\"?`);
+    if (!ok) return;
+    try {
+      await api.deleteWorkspace(workspace.id);
+      await refreshWorkspaces();
+    } catch (err) {
+      setApiNote(err.message || "Không xóa được sổ tay.");
     }
   }
 
@@ -149,7 +222,15 @@ export default function UserHomePage() {
               <p className="mt-6 text-2xl font-medium">Tạo sổ ghi chú mới</p>
             </button>
             {filteredWorkspaces.map((workspace, index) => (
-              <NotebookCard key={workspace.id || workspace.title} workspace={workspace} index={index} />
+              <NotebookCard
+                key={workspace.id || workspace.title}
+                workspace={workspace}
+                index={index}
+                menuOpen={menuWorkspaceId === workspace.id}
+                onToggleMenu={(id) => setMenuWorkspaceId((prev) => (prev === id ? null : id))}
+                onRename={handleRenameWorkspace}
+                onDelete={handleDeleteWorkspace}
+              />
             ))}
           </div>
         </section>

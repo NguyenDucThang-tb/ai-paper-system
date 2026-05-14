@@ -60,28 +60,19 @@ function SourceItem({ doc, active, onSelect }) {
   );
 }
 
-function normalizeQaSources(raw) {
-  if (!raw) return [];
-  if (Array.isArray(raw)) return raw.map((item) => (typeof item === "string" ? item : JSON.stringify(item)));
-  if (typeof raw === "string") {
-    const text = raw.trim();
-    if (!text) return [];
-    try {
-      const parsed = JSON.parse(text);
-      if (Array.isArray(parsed)) return parsed.map((item) => (typeof item === "string" ? item : JSON.stringify(item)));
-      return [text];
-    } catch {
-      return [text];
-    }
-  }
-  return [JSON.stringify(raw)];
+function stripSourcesFromAnswer(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  const marker = text.toLowerCase().lastIndexOf("nguồn:");
+  if (marker < 0) return text;
+  return text.slice(0, marker).trim();
 }
 
 function mapQaRow(item) {
   return {
     question: item.question,
-    answer: item.answer,
-    sources: normalizeQaSources(item.sources),
+    answer: stripSourcesFromAnswer(item.answer),
+    createdAt: item.created_at || null,
     pending: false,
   };
 }
@@ -182,7 +173,7 @@ export default function DocumentDetailPage() {
             notifiedReadyRef.current.add(documentId);
             pushSystemMessage(`Tài liệu "${title}" đã xử lý xong. Bạn có thể đặt câu hỏi và dùng AI ngay.`, "success");
           }
-          await loadDocumentFeatures(documentId, summaryStyle, { includeRecommendations: false });
+          await loadDocumentFeatures(documentId, summaryStyle, { includeRecommendations: true });
           return;
         }
 
@@ -219,6 +210,13 @@ export default function DocumentDetailPage() {
     if (shouldPollStatus(document.status)) {
       pollIngestionStatus(document.id, document.title || document.filename || `#${document.id}`);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [document?.id, document?.status]);
+
+  useEffect(() => {
+    if (!document?.id) return;
+    if (!isReadyStatus(document?.status)) return;
+    getRecommendations(document.id).then((items) => setRecommendations(items));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [document?.id, document?.status]);
 
@@ -281,6 +279,16 @@ export default function DocumentDetailPage() {
     setLoading(false);
   }
 
+  async function getRecommendations(documentId) {
+    try {
+      const response = await api.getRecommendations(documentId);
+      return response?.items || [];
+    } catch (error) {
+      console.error("getRecommendations failed", error);
+      return [];
+    }
+  }
+
   async function loadDocumentFeatures(documentId, style = "academic", options = {}) {
     const { includeRecommendations = true } = options;
     const [qaResponse, summaryResponse] = await Promise.allSettled([
@@ -289,7 +297,13 @@ export default function DocumentDetailPage() {
     ]);
 
     if (qaResponse.status === "fulfilled" && qaResponse.value?.length) {
-      setQaItems(qaResponse.value.map(mapQaRow));
+      const rows = qaResponse.value.map(mapQaRow);
+      rows.sort((a, b) => {
+        const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return ta - tb;
+      });
+      setQaItems(rows);
     } else {
       setQaItems([]);
     }
@@ -297,10 +311,7 @@ export default function DocumentDetailPage() {
     setSummary(summaryValue);
     setSummaryByStyle((prev) => ({ ...prev, [style]: summaryValue }));
     if (includeRecommendations) {
-      api
-        .getRecommendations(documentId)
-        .then((res) => setRecommendations(res?.items || []))
-        .catch(() => {});
+      getRecommendations(documentId).then((items) => setRecommendations(items));
     }
     return { summary: summaryValue };
   }
@@ -319,6 +330,17 @@ export default function DocumentDetailPage() {
         pollIngestionStatus(response.document_id, displayName);
       }
       if (response.document_id) {
+        if (workspaceId && String(workspace?.title || "").trim().toLowerCase() === "untitled notebook") {
+          try {
+            const uploadedDoc = await api.getDocument(response.document_id);
+            const uploadedTitle = String(uploadedDoc?.metadata?.title || uploadedDoc?.filename || "").trim();
+            if (uploadedTitle) {
+              await api.updateWorkspace(workspaceId, { title: uploadedTitle });
+            }
+          } catch {
+            // Keep default workspace title if update fails.
+          }
+        }
         if (workspaceId) {
           await loadWorkspace();
         } else {
@@ -398,10 +420,10 @@ export default function DocumentDetailPage() {
     const optimisticItem = {
       question: cleanQuestion,
       answer: "AI đang suy luận câu trả lời từ nội dung đã ingest...",
-      sources: [],
+      createdAt: new Date().toISOString(),
       pending: true,
     };
-    setQaItems((prev) => [optimisticItem, ...prev]);
+    setQaItems((prev) => [...prev, optimisticItem]);
     try {
       const response = await api.requestQuestion(document.id, cleanQuestion);
       if (response?.job_id && response.status !== "done" && response.status !== "failed") {
@@ -446,23 +468,9 @@ export default function DocumentDetailPage() {
     `${doc.title} ${doc.filename} ${doc.topics?.join(" ")}`.toLowerCase().includes(sourceQuery.toLowerCase()),
   );
   const groupedRecommendations = useMemo(() => {
-    const authorKeywords = ["author", "tác giả", "cùng tác giả", "same author"];
-    const methodKeywords = ["method", "phương pháp", "mô hình", "approach", "rag", "retrieval", "graph", "embedding"];
-
-    return recommendations.reduce(
-      (acc, item) => {
-        const haystack = `${item.title || ""} ${item.reason || ""}`.toLowerCase();
-        if (authorKeywords.some((keyword) => haystack.includes(keyword))) {
-          acc.author.push(item);
-        } else if (methodKeywords.some((keyword) => haystack.includes(keyword))) {
-          acc.method.push(item);
-        } else {
-          acc.method.push(item);
-        }
-        return acc;
-      },
-      { author: [], method: [] },
-    );
+    const byAuthor = recommendations.filter((r) => String(r.recommendation_type || "").toLowerCase() === "author");
+    const byMethod = recommendations.filter((r) => String(r.recommendation_type || "").toLowerCase() === "method");
+    return { author: byAuthor, method: byMethod };
   }, [recommendations]);
   const activeRecommendations = groupedRecommendations[recommendationMode] || [];
   const sourceCount = sources.length;
@@ -587,6 +595,19 @@ export default function DocumentDetailPage() {
                   <div key={item.id || item.title} className="rounded-lg bg-zinc-50 p-3">
                     <p className="text-sm font-medium text-zinc-900">{item.title}</p>
                     <p className="mt-1 text-xs leading-5 text-zinc-500">{item.reason || "Không có lý do gợi ý."}</p>
+                    <p className="mt-1 text-xs text-zinc-600">
+                      Score: {Number.isFinite(Number(item.score)) ? Number(item.score).toFixed(2) : "0.00"}
+                    </p>
+                    {item.external_url ? (
+                      <a
+                        href={item.external_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-1 inline-block text-xs text-blue-600 hover:underline"
+                      >
+                        Xem nguồn
+                      </a>
+                    ) : null}
                   </div>
                 )) : (
                   <div className="rounded-lg border border-dashed border-zinc-300 p-4 text-sm leading-6 text-zinc-500">
@@ -645,15 +666,7 @@ export default function DocumentDetailPage() {
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         Đang xử lý
                       </div>
-                    ) : item.sources?.length ? (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {item.sources.slice(0, 3).map((src) => (
-                          <Badge key={`${item.question}-${src}`} variant="secondary">Nguồn: {src}</Badge>
-                        ))}
-                      </div>
-                    ) : (
-                      <Badge variant="secondary" className="mt-3">Nguồn: Không có</Badge>
-                    )}
+                    ) : null}
                   </div>
                 ))}
                 <div ref={qaEndRef} />
@@ -690,7 +703,7 @@ export default function DocumentDetailPage() {
 
         <aside className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:overflow-hidden">
           <div className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-5">
-            <h2 className="text-lg font-medium">Studio</h2>
+            <h2 className="text-lg font-medium">Tóm tắt</h2>
             <PanelRight className="h-5 w-5 text-zinc-600" />
           </div>
 

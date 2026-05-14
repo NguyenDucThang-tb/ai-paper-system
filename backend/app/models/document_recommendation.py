@@ -14,6 +14,6 @@ class DocumentRecommendation(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     score: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str | None] = mapped_column(String(64))
+    recommendation_type: Mapped[str | None] = mapped_column(String(32))
     external_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-

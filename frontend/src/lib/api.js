@@ -147,6 +147,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  deleteWorkspace: (workspaceId) =>
+    request(`/workspaces/${workspaceId}`, {
+      method: "DELETE",
+    }),
   listDocuments: (params = {}) => {
     const search = new URLSearchParams(params).toString();
     return request(`/documents/${search ? `?${search}` : ""}`);
