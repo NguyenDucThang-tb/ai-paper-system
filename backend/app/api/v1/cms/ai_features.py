@@ -542,6 +542,16 @@ def _compute_neo4j_graph_recommendations(
     title = str(meta.title).strip() if meta and meta.title else str(document.filename or "").strip()
     doi = str(meta.doi).strip() if meta and meta.doi else ""
 
+    def _normalize_doi(raw: str) -> str:
+        s = (raw or "").strip()
+        if not s:
+            return ""
+        s = s.replace("https://doi.org/", "").replace("http://doi.org/", "")
+        s = s.replace("doi:", "").strip()
+        return s
+
+    doi = _normalize_doi(doi)
+
     def _resolve_seed_paper_id() -> str | None:
         seed_paper_id: str | None = None
 
@@ -558,7 +568,54 @@ def _compute_neo4j_graph_recommendations(
             )
             if rows:
                 seed_paper_id = str(rows[0]["id"])
+        if not seed_paper_id and title:
+            rows = client.execute_read(
+                """
+                MATCH (p:Paper)
+                WHERE toLower(coalesce(p.title,'')) CONTAINS toLower($title)
+                   OR toLower($title) CONTAINS toLower(coalesce(p.title,''))
+                RETURN p.id AS id, size(coalesce(p.title,'')) AS tlen
+                ORDER BY tlen DESC
+                LIMIT 1
+                """,
+                {"title": title},
+            )
+            if rows:
+                seed_paper_id = str(rows[0]["id"])
         return seed_paper_id
+
+    def _fallback_global_recommendations(k: int) -> list[RecommendationItem]:
+        rows = client.execute_read(
+            """
+            MATCH (p:Paper)
+            OPTIONAL MATCH (p)<-[:CITES]-(:Paper)
+            WITH p, count(*) AS cite_in
+            RETURN p.id AS id, p.title AS title, p.doi AS doi, cite_in
+            ORDER BY cite_in DESC, p.year DESC
+            LIMIT $k
+            """,
+            {"k": max(k, 10)},
+        )
+        items: list[RecommendationItem] = []
+        for row in rows:
+            rec_title = str(row.get("title") or row.get("id") or "Unknown paper")
+            doi_target = str(row.get("doi") or "").strip()
+            cite_in = int(row.get("cite_in") or 0)
+            items.append(
+                RecommendationItem(
+                    id=None,
+                    recommended_document_id=None,
+                    recommendation_type="method",
+                    title=rec_title,
+                    reason=f"global graph fallback; citations={cite_in}",
+                    score=float(cite_in),
+                    source="neo4j_graph_dump",
+                    external_url=(f"https://doi.org/{doi_target}" if doi_target else None),
+                )
+            )
+            if len(items) >= k:
+                break
+        return items
 
     client = Neo4jClient(cfg)
     client.connect()
@@ -592,9 +649,7 @@ def _compute_neo4j_graph_recommendations(
                 seed_paper_id = str(rows[0]["id"])
 
         if not seed_paper_id:
-            # Do not fallback to global graph leaderboard.
-            # Recommendation must be conditioned by the current uploaded document.
-            return []
+            return _fallback_global_recommendations(limit)
 
         prev_env = {
             "GRAPH_REC_W_CONCEPT": os.getenv("GRAPH_REC_W_CONCEPT"),
