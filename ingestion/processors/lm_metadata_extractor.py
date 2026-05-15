@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "").rstrip("/")
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_CHAT_ENDPOINT = os.getenv("OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions")
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}{OLLAMA_CHAT_ENDPOINT}"
@@ -28,6 +28,8 @@ DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
 TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))  # seconds
 MAX_INPUT_CHARS = 3000
+LOCKED_GPU_BASE_URL = os.getenv("INGESTION_LOCKED_OLLAMA_BASE_URL", "http://n2.ckey.vn:3397").rstrip("/")
+LOCKED_CHAT_ENDPOINT = os.getenv("INGESTION_LOCKED_OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions")
 
 METADATA_PROMPT_TEMPLATE = """Bạn là trợ lý trích xuất metadata từ bài báo khoa học.
 Trích xuất JSON với các trường sau từ đoạn text bài báo:
@@ -68,8 +70,34 @@ def _extract_model_ids(payload: dict) -> list[str]:
     return []
 
 
+def _is_locked_gpu_endpoint() -> bool:
+    """
+    Lock ingestion to one approved GPU endpoint to avoid using any other source.
+    """
+    if not OLLAMA_BASE_URL:
+        logger.warning("OLLAMA_BASE_URL is empty. Skipping LM metadata extraction.")
+        return False
+    if OLLAMA_BASE_URL != LOCKED_GPU_BASE_URL:
+        logger.warning(
+            "Blocked LM metadata extraction: OLLAMA_BASE_URL=%s is not allowed. Required=%s",
+            OLLAMA_BASE_URL,
+            LOCKED_GPU_BASE_URL,
+        )
+        return False
+    if OLLAMA_CHAT_ENDPOINT != LOCKED_CHAT_ENDPOINT:
+        logger.warning(
+            "Blocked LM metadata extraction: OLLAMA_CHAT_ENDPOINT=%s is not allowed. Required=%s",
+            OLLAMA_CHAT_ENDPOINT,
+            LOCKED_CHAT_ENDPOINT,
+        )
+        return False
+    return True
+
+
 def is_ollama_available(model: str = DEFAULT_MODEL) -> bool:
     """Kiểm tra endpoint LLM và model có sẵn không."""
+    if not _is_locked_gpu_endpoint():
+        return False
     try:
         import requests
 
@@ -143,6 +171,8 @@ def _generate(prompt: str, model: str = DEFAULT_MODEL) -> str:
     Preferred path: OpenAI-compatible chat endpoint (works with your GPU server).
     Fallback path: Ollama native generate endpoint.
     """
+    if not _is_locked_gpu_endpoint():
+        return ""
     text = _generate_openai_compatible(prompt, model=model)
     if text:
         return text
