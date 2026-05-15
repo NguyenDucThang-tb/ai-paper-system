@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import asdict
 from datetime import datetime
@@ -240,6 +241,44 @@ def _extract_text_for_fallback(file_path: Path) -> str:
     return extract_text_from_txt(str(file_path))
 
 
+def _is_hash_like_stem(stem: str) -> bool:
+    s = (stem or "").strip().lower()
+    return bool(re.fullmatch(r"[a-f0-9_-]{16,}", s))
+
+
+def _infer_title_from_text(full_text: str, filename: str) -> str:
+    stem = Path(filename or "").stem.strip()
+    lines = [ln.strip() for ln in (full_text or "").splitlines() if ln.strip()]
+    for ln in lines[:40]:
+        if len(ln) < 20 or len(ln) > 220:
+            continue
+        low = ln.lower()
+        if any(token in low for token in ("tài liệu tham khảo", "abstract", "keywords", "kết luận")):
+            continue
+        digit_ratio = sum(ch.isdigit() for ch in ln) / max(len(ln), 1)
+        if digit_ratio > 0.35:
+            continue
+        return ln
+    return stem if stem else "Unknown"
+
+
+def _infer_authors_from_text(full_text: str) -> list[str]:
+    lines = [ln.strip() for ln in (full_text or "").splitlines() if ln.strip()]
+    for ln in lines[:50]:
+        if len(ln) < 8 or len(ln) > 200:
+            continue
+        low = ln.lower()
+        if any(token in low for token in ("tóm tắt", "abstract", "từ khóa", "keywords", "mở đầu")):
+            continue
+        if "," not in ln and ";" not in ln:
+            continue
+        parts = [p.strip() for p in re.split(r"[;,]", ln) if p.strip()]
+        if 1 <= len(parts) <= 8 and all(2 <= len(p) <= 60 for p in parts):
+            if all(not any(ch.isdigit() for ch in p) for p in parts):
+                return parts
+    return []
+
+
 def _build_fallback_doc_payload(document: Document, file_path: Path) -> dict:
     try:
         full_text = _extract_text_for_fallback(file_path)
@@ -248,7 +287,10 @@ def _build_fallback_doc_payload(document: Document, file_path: Path) -> dict:
         full_text = ""
     now = datetime.utcnow().isoformat()
     short = (full_text or "").strip()
-    title = Path(document.filename).stem
+    title = _infer_title_from_text(short, document.filename)
+    if _is_hash_like_stem(title):
+        title = Path(document.filename).stem
+    inferred_authors = _infer_authors_from_text(short)
     section_content = short[:3000]
     chunk_content = short[:2500]
     return {
@@ -256,7 +298,7 @@ def _build_fallback_doc_payload(document: Document, file_path: Path) -> dict:
         "file": document.filename,
         "title": title,
         "abstract": short[:1200],
-        "authors": [],
+        "authors": inferred_authors,
         "keywords": [],
         "year": None,
         "journal": None,
