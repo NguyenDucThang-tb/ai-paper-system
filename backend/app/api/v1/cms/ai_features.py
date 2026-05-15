@@ -1691,6 +1691,25 @@ def get_recommendations(
 ):
     document = get_owned_document(db, document_id, current_user.id)
     doc_json = _load_document_artifact_json(db, document.id)
+    rec_configured = bool(
+        os.getenv("NEO4J_REC_URI", "").strip()
+        and (
+            os.getenv("NEO4J_REC_USER", "").strip()
+            or os.getenv("NEO4J_REC_USERNAME", "").strip()
+        )
+        and os.getenv("NEO4J_REC_PASSWORD", "").strip()
+    )
+    source_used = "postgres"
+    neo4j_failed = False
+    logger.info(
+        "Recommendation request workspace/document",
+        extra={
+            "workspace_id": getattr(document, "workspace_id", None),
+            "document_id": document.id,
+            "mode": "hybrid",
+            "neo4j_enabled": rec_configured,
+        },
+    )
 
     try:
         recommendations = (
@@ -1704,6 +1723,10 @@ def get_recommendations(
         recommendations = []
 
     if recommendations:
+        logger.info(
+            "Recommendation result",
+            extra={"count": len(recommendations), "source": "postgres"},
+        )
         return {
             "document_id": document.id,
             "items": [
@@ -1719,20 +1742,27 @@ def get_recommendations(
                 )
                 for item in recommendations
             ],
+            "source": "postgres",
         }
 
     items: list[RecommendationItem] = []
     try:
         items = _compute_neo4j_entity_recommendations(document=document, doc_json=doc_json, limit=10)
+        if items:
+            source_used = "neo4j_entity"
     except Exception:
         logger.exception("entity recommendations failed: document_id=%s", document.id)
+        neo4j_failed = True
         items = []
 
     if not items:
         try:
             items = _compute_neo4j_author_recommendations(document=document, doc_json=doc_json, limit=10)
+            if items:
+                source_used = "neo4j_author"
         except Exception:
             logger.exception("author recommendations failed: document_id=%s", document.id)
+            neo4j_failed = True
             items = []
 
     if not items:
@@ -1741,12 +1771,17 @@ def get_recommendations(
             for it in items:
                 if not getattr(it, "recommendation_type", None):
                     it.recommendation_type = "method"
+            if items:
+                source_used = "neo4j_graph"
         except Exception:
             logger.exception("graph recommendations failed: document_id=%s", document.id)
+            neo4j_failed = True
             items = []
 
     if not items:
         items = _compute_metadata_recommendations(db, current_user.id, document, limit=10)
+        if items:
+            source_used = "metadata"
         for it in items:
             if not getattr(it, "recommendation_type", None):
                 it.recommendation_type = "author"
@@ -1781,8 +1816,23 @@ def get_recommendations(
         db.commit()
     except Exception:
         db.rollback()
+    reason = None
+    message = None
+    if not items and (neo4j_failed or not rec_configured):
+        reason = "NEO4J_NOT_CONNECTED"
+        message = "Neo4j chưa kết nối nên chưa thể tạo gợi ý theo graph."
 
-    return {"document_id": document.id, "items": items}
+    logger.info(
+        "Recommendation result",
+        extra={"count": len(items), "source": source_used, "reason": reason},
+    )
+    return {
+        "document_id": document.id,
+        "items": items,
+        "reason": reason,
+        "message": message,
+        "source": source_used,
+    }
 
 
 @router.get("/recommendations/debug")

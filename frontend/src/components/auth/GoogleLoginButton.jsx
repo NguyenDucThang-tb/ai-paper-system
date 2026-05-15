@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { api } from "@/lib/api";
+import { api, apiBaseUrl } from "@/lib/api";
 
 function getButtonLabel(mode) {
   if (mode === "signup_with") return "Đăng ký bằng Gmail";
@@ -9,7 +9,7 @@ function getButtonLabel(mode) {
 
 export function GoogleLoginButton({ text = "signin_with", onError }) {
   const [loading, setLoading] = useState(false);
-  const apiBase = import.meta.env.VITE_API_BASE_URL || "https://triumphant-charisma-production-f2a9.up.railway.app/api/v1";
+  const apiBase = apiBaseUrl;
 
   async function handleClick() {
     setLoading(true);

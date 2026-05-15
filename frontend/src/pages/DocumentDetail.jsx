@@ -20,7 +20,7 @@ import AssistantMessage from "@/components/chat/AssistantMessage";
 import DeleteDocumentDialog from "@/components/cms/DeleteDocumentDialog";
 import SummaryRenderer from "@/components/summary/SummaryRenderer";
 import { cleanAnswerText } from "@/utils/answerCleaner";
-import { api } from "@/lib/api";
+import { api, apiBaseUrl, buildApiUrl } from "@/lib/api";
 import { mapApiDocument, mapApiDocuments } from "@/lib/documentMapper";
 import { deleteDocument } from "@/services/cmsService";
 
@@ -393,9 +393,23 @@ export default function DocumentDetailPage() {
   async function getRecommendations(documentId) {
     setRecommendationLoading(true);
     setRecommendationError("");
+    const requestPath = `/cms/documents/${documentId}/recommendations`;
+    const requestUrl = buildApiUrl(requestPath);
+    console.log("Recommendation request URL:", requestUrl);
+    console.log("Recommendation selected document:", documentId);
+    console.log("Recommendation selected workspace:", workspaceId || null);
+    console.log("Recommendation API base:", apiBaseUrl);
     try {
       const response = await api.getRecommendations(documentId);
-      return response?.items || [];
+      console.log("Recommendation raw response:", response);
+      const items = response?.recommendations ?? response?.items ?? response?.data ?? [];
+      const reason = String(response?.reason || "").trim();
+      if (reason === "NEO4J_NOT_CONNECTED") {
+        setRecommendationError(
+          response?.message || "Chưa thể tải gợi ý vì backend chưa kết nối Neo4j.",
+        );
+      }
+      return items;
     } catch (error) {
       console.error("getRecommendations failed", error);
       setRecommendationError("Không thể tải gợi ý tài liệu. Vui lòng thử lại sau.");

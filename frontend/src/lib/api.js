@@ -1,6 +1,12 @@
 function normalizeApiBase(raw) {
-  const fallback = "https://triumphant-charisma-production-f2a9.up.railway.app/api/v1";
-  if (!raw || typeof raw !== "string") return fallback;
+  const isProd = Boolean(import.meta.env.PROD);
+  const devFallback = "http://localhost:8000/api/v1";
+  if (!raw || typeof raw !== "string") {
+    if (isProd) {
+      throw new Error("Missing VITE_API_BASE_URL in production");
+    }
+    return devFallback;
+  }
 
   let base = raw.trim().replace(/\/+$/, "");
 
@@ -19,6 +25,11 @@ function normalizeApiBase(raw) {
 }
 
 const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
+export const apiBaseUrl = API_BASE;
+export const buildApiUrl = (path) => `${API_BASE}${path}`;
+
+console.log("API BASE URL:", import.meta.env.VITE_API_BASE_URL);
+console.log("Resolved API BASE:", API_BASE);
 
 function cleanParams(params = {}) {
   return Object.fromEntries(
@@ -55,7 +66,7 @@ async function request(path, options = {}) {
     ...options.headers,
   };
 
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(buildApiUrl(path), {
     ...options,
     headers,
   });
