@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -528,13 +529,13 @@ def _compute_neo4j_graph_recommendations(
     from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
 
     cfg = Neo4jConfig(
-        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
+        uri=os.getenv("NEO4J_REC_URI", "").strip(),
         username=os.getenv(
             "NEO4J_REC_USER",
-            os.getenv("NEO4J_REC_USERNAME", os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", ""))),
+            os.getenv("NEO4J_REC_USERNAME", ""),
         ).strip(),
-        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
-        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
+        password=os.getenv("NEO4J_REC_PASSWORD", "").strip(),
+        database=os.getenv("NEO4J_REC_DATABASE", "neo4j").strip(),
     )
     if not cfg.uri or not cfg.username or not cfg.password:
         return []
@@ -722,13 +723,13 @@ def _compute_neo4j_author_recommendations(
     from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
 
     cfg = Neo4jConfig(
-        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
+        uri=os.getenv("NEO4J_REC_URI", "").strip(),
         username=os.getenv(
             "NEO4J_REC_USER",
-            os.getenv("NEO4J_REC_USERNAME", os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", ""))),
+            os.getenv("NEO4J_REC_USERNAME", ""),
         ).strip(),
-        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
-        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
+        password=os.getenv("NEO4J_REC_PASSWORD", "").strip(),
+        database=os.getenv("NEO4J_REC_DATABASE", "neo4j").strip(),
     )
     if not cfg.uri or not cfg.username or not cfg.password:
         return []
@@ -854,13 +855,13 @@ def _compute_neo4j_entity_recommendations(
         return []
 
     cfg = Neo4jConfig(
-        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
+        uri=os.getenv("NEO4J_REC_URI", "").strip(),
         username=os.getenv(
             "NEO4J_REC_USER",
-            os.getenv("NEO4J_REC_USERNAME", os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", ""))),
+            os.getenv("NEO4J_REC_USERNAME", ""),
         ).strip(),
-        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
-        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
+        password=os.getenv("NEO4J_REC_PASSWORD", "").strip(),
+        database=os.getenv("NEO4J_REC_DATABASE", "neo4j").strip(),
     )
     if not cfg.uri or not cfg.username or not cfg.password:
         return []
@@ -1782,3 +1783,63 @@ def get_recommendations(
         db.rollback()
 
     return {"document_id": document.id, "items": items}
+
+
+@router.get("/recommendations/debug")
+def debug_recommendation_backend(current_user=Depends(get_current_user)):
+    from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
+
+    def _host(uri: str) -> str:
+        return urlparse(uri).netloc if uri else ""
+
+    rec_cfg = Neo4jConfig(
+        uri=os.getenv("NEO4J_REC_URI", "").strip(),
+        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_REC_USERNAME", "")).strip(),
+        password=os.getenv("NEO4J_REC_PASSWORD", "").strip(),
+        database=os.getenv("NEO4J_REC_DATABASE", "neo4j").strip(),
+    )
+    user_cfg = Neo4jConfig(
+        uri=os.getenv("NEO4J_URI", "").strip(),
+        username=os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "")).strip(),
+        password=os.getenv("NEO4J_PASSWORD", "").strip(),
+        database=os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
+    )
+
+    out: dict[str, Any] = {
+        "current_user_id": current_user.id,
+        "rec": {
+            "uri_host": _host(rec_cfg.uri),
+            "database": rec_cfg.database,
+            "username": rec_cfg.username,
+            "configured": bool(rec_cfg.uri and rec_cfg.username and rec_cfg.password),
+            "paper_count": None,
+            "error": None,
+        },
+        "user": {
+            "uri_host": _host(user_cfg.uri),
+            "database": user_cfg.database,
+            "username": user_cfg.username,
+            "configured": bool(user_cfg.uri and user_cfg.username and user_cfg.password),
+            "paper_count": None,
+            "error": None,
+        },
+    }
+
+    for key, cfg in (("rec", rec_cfg), ("user", user_cfg)):
+        if not (cfg.uri and cfg.username and cfg.password):
+            out[key]["error"] = "missing_env"
+            continue
+        client = Neo4jClient(cfg)
+        try:
+            client.connect()
+            rows = client.execute_read("MATCH (p:Paper) RETURN count(p) AS c")
+            out[key]["paper_count"] = int(rows[0]["c"]) if rows else 0
+        except Exception as ex:
+            out[key]["error"] = str(ex)
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    return out
