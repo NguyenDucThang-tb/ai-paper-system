@@ -126,7 +126,7 @@ def run_pipeline(
     aggressive_clean:       bool = False,
     multimodal_output_root: str  = "data/multimodal/figures",
     dry_run_enrich:         bool = False,
-    use_lm:                 bool = False,
+    use_lm:                 bool = True,
 ) -> PipelineResult:
     """
     Chạy toàn bộ ingestion pipeline cho một file.

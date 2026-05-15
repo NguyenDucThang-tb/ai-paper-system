@@ -5,7 +5,7 @@ Batch ingestion script cho hệ thống paper-rag-kg.
 
 Flow mỗi PDF:
   1. Pipeline: detect → load → split → clean → parse → normalize → enrich
-  2. LM metadata extraction (Ollama Qwen2.5-7B) — optional
+  2. LM metadata extraction (Ollama Qwen2.5-7B) — enabled by default
   3. Lưu kết quả ra JSON files vào data/processed/
 
 Usage:
@@ -15,8 +15,11 @@ Usage:
   # Chạy batch (toàn bộ thư mục)
   python scripts/ingest_data.py path/to/pdf_folder/ --batch
 
-  # Chạy với LM metadata extraction
-  python scripts/ingest_data.py path/to/pdf_folder/ --batch --use-lm
+  # Chạy với LM metadata extraction (default)
+  python scripts/ingest_data.py path/to/pdf_folder/ --batch
+
+  # Tắt LM metadata extraction
+  python scripts/ingest_data.py path/to/pdf_folder/ --batch --no-lm
 
   # Resume (skip bài đã có output)
   python scripts/ingest_data.py path/to/pdf_folder/ --batch --resume
@@ -196,7 +199,8 @@ def main():
 Examples:
   python scripts/ingest_data.py paper.pdf
   python scripts/ingest_data.py papers/ --batch
-  python scripts/ingest_data.py papers/ --batch --use-lm --resume
+  python scripts/ingest_data.py papers/ --batch --resume
+  python scripts/ingest_data.py papers/ --batch --no-lm
   python scripts/ingest_data.py paper.pdf --dry-run-enrich
         """,
     )
@@ -204,8 +208,10 @@ Examples:
     parser.add_argument("--batch", action="store_true", help="Process toàn bộ directory")
     parser.add_argument("--output", default=DEFAULT_OUTPUT_DIR, metavar="DIR",
                         help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})")
-    parser.add_argument("--use-lm", action="store_true",
-                        help="Dùng Ollama LM để extract metadata")
+    parser.add_argument("--use-lm", action="store_true", default=True,
+                        help="Bật LM metadata extraction (mặc định: bật)")
+    parser.add_argument("--no-lm", dest="use_lm", action="store_false",
+                        help="Tắt LM metadata extraction")
     parser.add_argument("--lm-model", default="qwen2.5:7b", metavar="MODEL",
                         help="Ollama model name (default: qwen2.5:7b)")
     parser.add_argument("--resume", action="store_true",
@@ -222,6 +228,9 @@ Examples:
                         help="Verbose logging (DEBUG level)")
 
     args = parser.parse_args()
+
+    if args.lm_model:
+        os.environ["OLLAMA_MODEL"] = args.lm_model
 
     # Setup logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
