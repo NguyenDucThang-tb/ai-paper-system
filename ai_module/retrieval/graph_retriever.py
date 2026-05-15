@@ -1212,10 +1212,10 @@ def create_graph_retriever_from_env() -> GraphRetriever:
     Tạo GraphRetriever từ biến môi trường.
 
     .env:
-        NEO4J_URI=neo4j+s://your-instance.databases.neo4j.io
+        NEO4J_URI=neo4j+s://6d37f1fa.databases.neo4j.io
         NEO4J_USER=neo4j
-        NEO4J_PASSWORD=password
-        NEO4J_USER_DOC_DB=user_doc_kg       # database cho KG user upload
+        NEO4J_PASSWORD=I3Pzsg1gvUw2BCFsp3A6CjuhjjY9XIun1Fp6dsYJo3s
+        NEO4J_USER_DOC_DB=neo4j
         GRAPH_RETRIEVER_TOP_K=10
         GRAPH_RETRIEVER_DEPTH=2
         GRAPH_RETRIEVER_MIN_SCORE=0.3

@@ -4,7 +4,7 @@ import { clearSession, getSessionState, setSession, type SessionUser } from './s
 
 const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_BASE_URL ||
-  (Platform.OS === 'android' ? 'http://10.0.2.2:8000/api/v1' : 'http://127.0.0.1:8000/api/v1');
+  'https://triumphant-charisma-production-f2a9.up.railway.app/api/v1';
 
 function queryString(params: Record<string, string | number | undefined | null>) {
   const entries = Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '');

@@ -25,19 +25,19 @@ npm install
 Tao file `.env` (hoac `.env.local`) trong thu muc `mobile`:
 
 ```env
-EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api/v1
+EXPO_PUBLIC_API_BASE_URL=https://triumphant-charisma-production-f2a9.up.railway.app/api/v1
 ```
 
 Neu dung Android emulator:
 
 ```env
-EXPO_PUBLIC_API_BASE_URL=http://10.0.2.2:8000/api/v1
+EXPO_PUBLIC_API_BASE_URL=https://triumphant-charisma-production-f2a9.up.railway.app/api/v1
 ```
 
 Neu dung dien thoai that (cung Wi-Fi voi backend):
 
 ```env
-EXPO_PUBLIC_API_BASE_URL=http://http://127.0.0.1:8000/api/v1
+EXPO_PUBLIC_API_BASE_URL=https://triumphant-charisma-production-f2a9.up.railway.app/api/v1
 ```
 
 ## Chay
