@@ -202,44 +202,40 @@ def _metadata_quality_score(payload: dict) -> int:
 def _repair_metadata_from_existing_json(document: Document, payload: dict) -> dict:
     """
     If current metadata looks low-quality, borrow better metadata
-    from existing processed files with same stem across data/processed/*.
+    from the previous processed JSON of the same user/document stem only.
     """
     stem = Path(document.filename).stem
     current_score = _metadata_quality_score(payload)
     if current_score >= 8:
         return payload
 
-    base_dir = PROJECT_ROOT / "data" / "processed"
-    if not base_dir.exists():
+    user_dir = PROJECT_ROOT / "data" / "processed" / str(document.user_id)
+    if not user_dir.exists():
         return payload
 
-    best = payload
-    best_score = current_score
-    pattern = f"*/{stem}.json"
-    for candidate in base_dir.glob(pattern):
-        try:
-            if candidate.resolve() == (base_dir / str(document.user_id) / f"{stem}.json").resolve():
-                continue
-            data = json.loads(candidate.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                continue
-            s = _metadata_quality_score(data)
-            if s > best_score:
-                best = data
-                best_score = s
-        except Exception:
-            continue
+    candidate = user_dir / f"{stem}.json"
+    if not candidate.exists():
+        return payload
 
-    if best is payload:
+    try:
+        data = json.loads(candidate.read_text(encoding="utf-8"))
+    except Exception:
+        return payload
+    if not isinstance(data, dict):
+        return payload
+
+    best_score = _metadata_quality_score(data)
+    if best_score <= current_score:
         return payload
 
     repaired = dict(payload)
     for key in ("title", "authors", "abstract", "year", "journal", "doi", "keywords", "language"):
-        if best.get(key):
-            repaired[key] = best.get(key)
+        if data.get(key):
+            repaired[key] = data.get(key)
     logger.warning(
-        "Metadata repaired from existing JSON for document_id=%s (score %s -> %s)",
+        "Metadata repaired from previous JSON for document_id=%s source=%s (score %s -> %s)",
         document.id,
+        str(candidate),
         current_score,
         best_score,
     )

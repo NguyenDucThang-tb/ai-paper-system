@@ -25,6 +25,7 @@ Cấu hình:
 import base64
 import io
 import logging
+import os
 import re
 from dataclasses import replace as dc_replace
 from datetime import datetime
@@ -50,6 +51,12 @@ logger = logging.getLogger(__name__)
 
 OCR_DPI         = 200      # render resolution — 150 đủ nhanh, 300 cho scan mờ
 OCR_ENGINE      = "auto"   # 'paddle' | 'tesseract' | 'auto'
+OCR_BACKEND     = os.getenv("OCR_BACKEND", "local").strip().lower()  # 'local' | 'remote'
+OCR_BASE_URL    = os.getenv("OCR_BASE_URL", "").strip().rstrip("/")
+OCR_REMOTE_ENDPOINT = os.getenv("OCR_REMOTE_ENDPOINT", "/v1/chat/completions").strip()
+OCR_REMOTE_MODEL_NAME = os.getenv("OCR_REMOTE_MODEL_NAME", "").strip()
+OCR_TIMEOUT_SECONDS = int(os.getenv("OCR_TIMEOUT_SECONDS", "120"))
+OCR_REMOTE_API_KEY = os.getenv("OCR_REMOTE_API_KEY", "").strip()
 COL_SPLIT_RATIO = 0.50     # x-split ratio cho 2-column layout
 MIN_IMG_WIDTH   = 80       # pixel width tối thiểu để lưu figure
 MIN_IMG_HEIGHT  = 80       # pixel height tối thiểu
@@ -163,6 +170,7 @@ def load_pdf(
     file_path: str,
     ocr_engine: str = OCR_ENGINE,
     ocr_dpi: int = OCR_DPI,
+    ocr_backend: str = OCR_BACKEND,
 ) -> UnifiedDocument:
     """
     Load academic PDF vào UnifiedDocument bằng OCR pipeline.
@@ -189,8 +197,8 @@ def load_pdf(
     page_images, fitz_doc = _rasterize_pages(path, dpi=ocr_dpi)
 
     # --- Step 2: OCR mỗi trang ---
-    engine = _select_ocr_engine(ocr_engine)
-    page_texts = _ocr_pages(page_images, engine)
+    engine = _select_ocr_engine(ocr_engine, ocr_backend)
+    page_texts = _ocr_pages(page_images, engine, ocr_backend)
 
     # --- Step 3: PyMuPDF 2-column layout extraction ---
     # Với trang có text layer, extract text giữ nguyên cấu trúc cột rồi merge với OCR
@@ -271,8 +279,11 @@ def _rasterize_pages(path: Path, dpi: int) -> tuple[list[Image.Image], fitz.Docu
 # Step 2: OCR
 # ---------------------------------------------------------------------------
 
-def _select_ocr_engine(preference: str) -> str:
+def _select_ocr_engine(preference: str, backend: str) -> str:
     """Chọn OCR engine khả dụng."""
+    if backend == "remote":
+        return "remote"
+
     if preference == "paddle":
         if _check_paddle():
             return "paddle"
@@ -297,11 +308,69 @@ def _check_paddle() -> bool:
         return False
 
 
-def _ocr_pages(images: list[Image.Image], engine: str) -> list[str]:
+def _ocr_pages(images: list[Image.Image], engine: str, backend: str) -> list[str]:
     """OCR tất cả trang, trả về list[str] text theo thứ tự trang."""
+    if backend == "remote":
+        return _ocr_with_remote(images)
     if engine == "paddle":
         return _ocr_with_paddle(images)
     return _ocr_with_tesseract(images)
+
+
+def _ocr_with_remote(images: list[Image.Image]) -> list[str]:
+    """
+    OCR qua remote GPU server, endpoint OpenAI-compatible chat completions.
+    """
+    if not OCR_BASE_URL:
+        raise RuntimeError("OCR_BASE_URL is required when OCR_BACKEND=remote.")
+    if not OCR_REMOTE_MODEL_NAME:
+        raise RuntimeError("OCR_REMOTE_MODEL_NAME is required when OCR_BACKEND=remote.")
+
+    try:
+        import requests
+    except ImportError:
+        raise RuntimeError("requests not installed. Run: pip install requests")
+
+    endpoint = f"{OCR_BASE_URL}{OCR_REMOTE_ENDPOINT}"
+    headers = {"Content-Type": "application/json"}
+    if OCR_REMOTE_API_KEY:
+        headers["Authorization"] = f"Bearer {OCR_REMOTE_API_KEY}"
+
+    results: list[str] = []
+    for i, img in enumerate(images):
+        try:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+            payload = {
+                "model": OCR_REMOTE_MODEL_NAME,
+                "temperature": 0,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Extract all visible text from this page. Return plain text only."},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    }
+                ],
+            }
+            resp = requests.post(endpoint, headers=headers, json=payload, timeout=OCR_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            data = resp.json()
+            text = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
+            if not isinstance(text, str):
+                text = str(text or "")
+            results.append(text.strip())
+            logger.info("  -> Page %d/%d OCR done: %d chars (remote)", i + 1, len(images), len(text))
+        except Exception as e:
+            logger.warning("Remote OCR failed on page %d: %s", i + 1, e)
+            results.append("")
+    return results
 
 
 def _ocr_with_paddle(images: list[Image.Image]) -> list[str]:
