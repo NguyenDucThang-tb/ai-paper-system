@@ -1228,12 +1228,12 @@ def create_graph_retriever_from_env() -> GraphRetriever:
 
     neo4j_client = Neo4jClient(Neo4jConfig(
         uri=      os.getenv("NEO4J_URI", ""),
-        username= os.getenv("NEO4J_USER", ""),
+        username= os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "")),
         password= os.getenv("NEO4J_PASSWORD", ""),
         database= database,
     ))
     if not neo4j_client.config.uri or not neo4j_client.config.username or not neo4j_client.config.password:
-        raise ValueError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD")
+        raise ValueError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER(or NEO4J_USERNAME)/NEO4J_PASSWORD")
     neo4j_client.connect()
 
     config = GraphRetrieverConfig(

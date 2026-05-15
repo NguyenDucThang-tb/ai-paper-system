@@ -52,7 +52,7 @@ class InferenceConfig:
 
     neo4j_enabled: bool = os.getenv("NEO4J_ENABLED", "false").lower() == "true"
     neo4j_uri: str = os.getenv("NEO4J_URI", "")
-    neo4j_user: str = os.getenv("NEO4J_USER", "")
+    neo4j_user: str = os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", ""))
     neo4j_password: str = os.getenv("NEO4J_PASSWORD", "")
     neo4j_database: str = os.getenv("NEO4J_DATABASE", "neo4j")
 

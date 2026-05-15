@@ -331,12 +331,12 @@ def _build_kg_with_ai_module(doc_json: dict) -> tuple[list[dict], list[dict]]:
     )
     cfg = Neo4jConfig(
         uri=os.getenv("NEO4J_URI", "").strip(),
-        username=os.getenv("NEO4J_USER", "").strip(),
+        username=os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "")).strip(),
         password=os.getenv("NEO4J_PASSWORD", "").strip(),
         database=os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
     )
     if not cfg.uri or not cfg.username or not cfg.password:
-        raise RuntimeError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD")
+        raise RuntimeError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER(or NEO4J_USERNAME)/NEO4J_PASSWORD")
     client = Neo4jClient(cfg)
     client.connect()
     try:
@@ -393,7 +393,7 @@ def _build_kg_from_neo4j(document: Document) -> tuple[list[dict], list[dict]]:
         return [], []
 
     uri = os.getenv("NEO4J_URI", "").strip()
-    user = os.getenv("NEO4J_USER", "").strip()
+    user = os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "")).strip()
     password = os.getenv("NEO4J_PASSWORD", "").strip()
     database = os.getenv("NEO4J_DATABASE", "neo4j").strip()
     if not uri or not user or not password:
@@ -529,7 +529,10 @@ def _compute_neo4j_graph_recommendations(
 
     cfg = Neo4jConfig(
         uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
-        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "")).strip(),
+        username=os.getenv(
+            "NEO4J_REC_USER",
+            os.getenv("NEO4J_REC_USERNAME", os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", ""))),
+        ).strip(),
         password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
         database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
     )
@@ -665,7 +668,10 @@ def _compute_neo4j_author_recommendations(
 
     cfg = Neo4jConfig(
         uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
-        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "")).strip(),
+        username=os.getenv(
+            "NEO4J_REC_USER",
+            os.getenv("NEO4J_REC_USERNAME", os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", ""))),
+        ).strip(),
         password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
         database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
     )
@@ -794,7 +800,10 @@ def _compute_neo4j_entity_recommendations(
 
     cfg = Neo4jConfig(
         uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
-        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "")).strip(),
+        username=os.getenv(
+            "NEO4J_REC_USER",
+            os.getenv("NEO4J_REC_USERNAME", os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", ""))),
+        ).strip(),
         password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
         database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
     )

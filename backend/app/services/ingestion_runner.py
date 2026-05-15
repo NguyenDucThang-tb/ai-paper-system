@@ -403,12 +403,12 @@ def _auto_build_graph(document: Document, db: Session, doc_payload: dict) -> boo
 
         neo4j_cfg = Neo4jConfig(
             uri=os.getenv("NEO4J_URI", "").strip(),
-            username=os.getenv("NEO4J_USER", "").strip(),
+            username=os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "")).strip(),
             password=os.getenv("NEO4J_PASSWORD", "").strip(),
             database=os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
         )
         if not neo4j_cfg.uri or not neo4j_cfg.username or not neo4j_cfg.password:
-            raise RuntimeError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD")
+            raise RuntimeError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER(or NEO4J_USERNAME)/NEO4J_PASSWORD")
         client = Neo4jClient(neo4j_cfg)
         client.connect()
         try:
