@@ -11,14 +11,12 @@ class DocumentMetadataBase(BaseModel):
     title: str | None = None
     abstract: str | None = None
     publication_year: int | None = Field(default=None, ge=1000, le=3000)
-    source: str | None = None
     language: str = "vi"
     authors: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
     methods: list[str] = Field(default_factory=list)
     doi: str | None = None
-    external_url: str | None = None
 
 
 class DocumentMetadataUpdate(DocumentMetadataBase):

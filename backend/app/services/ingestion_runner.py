@@ -193,7 +193,6 @@ def _upsert_metadata(db: Session, document_id: int, doc_obj) -> None:
     meta.title = _strip_nul(payload.get("title"))
     meta.abstract = _strip_nul(payload.get("abstract"))
     meta.publication_year = payload.get("year")
-    meta.source = payload.get("journal")
     meta.language = _strip_nul(payload.get("language"))
     meta.authors = [_strip_nul(x) for x in (payload.get("authors") or [])]
     meta.keywords = [_strip_nul(x) for x in (payload.get("keywords") or [])]
@@ -403,11 +402,13 @@ def _auto_build_graph(document: Document, db: Session, doc_payload: dict) -> boo
         from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
 
         neo4j_cfg = Neo4jConfig(
-            uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-            username=os.getenv("NEO4J_USER", "neo4j"),
-            password=os.getenv("NEO4J_PASSWORD", "password"),
-            database=os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j")),
+            uri=os.getenv("NEO4J_URI", "").strip(),
+            username=os.getenv("NEO4J_USER", "").strip(),
+            password=os.getenv("NEO4J_PASSWORD", "").strip(),
+            database=os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
         )
+        if not neo4j_cfg.uri or not neo4j_cfg.username or not neo4j_cfg.password:
+            raise RuntimeError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD")
         client = Neo4jClient(neo4j_cfg)
         client.connect()
         try:

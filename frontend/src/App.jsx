@@ -11,7 +11,9 @@ import AnalyticsPage from "./pages/Analytics";
 import GoogleAuthCallbackPage from "./pages/GoogleAuthCallback";
 import ForgotPasswordPage from "./pages/ForgotPassword";
 
-import DashboardPage from "./pages/Dashboard";
+import AdminDashboardPage from "./pages/AdminDashboardPage";
+import AdminUsersPage from "./pages/AdminUsersPage";
+import AdminDocumentsPage from "./pages/AdminDocumentsPage";
 
 function App() {
   return (
@@ -23,7 +25,10 @@ function App() {
       <Route path="/auth/google/callback" element={<GoogleAuthCallbackPage />} />
       <Route path="/home" element={<UserHomePage />} />
 
-      <Route path="/admin" element={<DashboardPage />} />
+      <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
+      <Route path="/admin/dashboard" element={<AdminDashboardPage />} />
+      <Route path="/admin/users" element={<AdminUsersPage />} />
+      <Route path="/admin/documents" element={<AdminDocumentsPage />} />
 
       <Route path="/upload" element={<UploadPage />} />
       <Route path="/library" element={<LibraryPage />} />

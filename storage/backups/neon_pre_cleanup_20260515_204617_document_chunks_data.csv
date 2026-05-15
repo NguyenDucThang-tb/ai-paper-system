@@ -1,0 +1,2 @@
+id,document_id,chunk_index,content,embedding
+1,1,1,sample-text,[1.0]

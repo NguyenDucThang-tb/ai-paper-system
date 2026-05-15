@@ -1,0 +1,15 @@
+                                                             Table "public.document_chunks"
+   Column    |  Type   | Collation | Nullable |                      Default                       | Storage  | Compression | Stats target | Description 
+-------------+---------+-----------+----------+----------------------------------------------------+----------+-------------+--------------+-------------
+ id          | bigint  |           | not null | nextval('public.document_chunks_id_seq'::regclass) | plain    |             |              | 
+ document_id | bigint  |           | not null |                                                    | plain    |             |              | 
+ chunk_index | integer |           | not null |                                                    | plain    |             |              | 
+ content     | text    |           | not null |                                                    | extended |             |              | 
+ embedding   | jsonb   |           |          |                                                    | extended |             |              | 
+Indexes:
+    "document_chunks_pkey" PRIMARY KEY, btree (id)
+    "uq_document_chunks_document_id_chunk_index" UNIQUE CONSTRAINT, btree (document_id, chunk_index)
+Foreign-key constraints:
+    "document_chunks_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+Access method: heap
+

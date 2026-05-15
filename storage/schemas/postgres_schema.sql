@@ -117,9 +117,7 @@ CREATE INDEX IF NOT EXISTS ix_document_chunks_document_id ON document_chunks(doc
 CREATE TABLE IF NOT EXISTS document_summaries (
     id BIGSERIAL PRIMARY KEY,
     document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    summary_short TEXT,
-    summary_medium TEXT,
-    summary_long TEXT,
+    summary TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

@@ -20,6 +20,12 @@ function normalizeApiBase(raw) {
 
 const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
 
+function cleanParams(params = {}) {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+  );
+}
+
 function getToken() {
   return localStorage.getItem("access_token");
 }
@@ -277,7 +283,15 @@ export const api = {
     }),
   analytics: (groupBy = "year") =>
     request(`/cms/analytics/overview?group_by=${groupBy}`),
-  adminUsers: () => request("/admin/users"),
+  adminOverview: () => request("/admin/overview"),
+  adminUsers: (params = {}) => {
+    const search = new URLSearchParams(cleanParams(params)).toString();
+    return request(`/admin/users${search ? `?${search}` : ""}`);
+  },
+  adminDocuments: (params = {}) => {
+    const search = new URLSearchParams(cleanParams(params)).toString();
+    return request(`/admin/documents${search ? `?${search}` : ""}`);
+  },
   updateAdminUser: (userId, payload) =>
     request(`/admin/users/${userId}`, {
       method: "PATCH",

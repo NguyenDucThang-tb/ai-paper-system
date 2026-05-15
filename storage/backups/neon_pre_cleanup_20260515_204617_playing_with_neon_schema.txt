@@ -1,0 +1,10 @@
+                                                           Table "public.playing_with_neon"
+ Column |  Type   | Collation | Nullable |                       Default                        | Storage  | Compression | Stats target | Description 
+--------+---------+-----------+----------+------------------------------------------------------+----------+-------------+--------------+-------------
+ id     | integer |           | not null | nextval('public.playing_with_neon_id_seq'::regclass) | plain    |             |              | 
+ name   | text    |           | not null |                                                      | extended |             |              | 
+ value  | real    |           |          |                                                      | plain    |             |              | 
+Indexes:
+    "playing_with_neon_pkey" PRIMARY KEY, btree (id)
+Access method: heap
+

@@ -780,9 +780,9 @@ def main():
     )
 
     # Neo4j
-    parser.add_argument("--neo4j-uri",      default=os.getenv("NEO4J_URI",      "bolt://localhost:7687"))
-    parser.add_argument("--neo4j-user",     default=os.getenv("NEO4J_USER",     "neo4j"))
-    parser.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "password"))
+    parser.add_argument("--neo4j-uri",      default=os.getenv("NEO4J_URI",      ""))
+    parser.add_argument("--neo4j-user",     default=os.getenv("NEO4J_USER",     ""))
+    parser.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", ""))
 
     # Ollama
     parser.add_argument("--ollama-model",    default=os.getenv("OLLAMA_MODEL", "qwen2.5:7b"))

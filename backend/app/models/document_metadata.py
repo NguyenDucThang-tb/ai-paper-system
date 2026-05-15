@@ -13,16 +13,13 @@ class DocumentMetadata(Base):
     title: Mapped[str | None] = mapped_column(Text)
     abstract: Mapped[str | None] = mapped_column(Text)
     publication_year: Mapped[int | None] = mapped_column(Integer)
-    source: Mapped[str | None] = mapped_column(Text)
     language: Mapped[str | None] = mapped_column(String(16), default="vi")
     authors: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     keywords: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     topics: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     methods: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     doi: Mapped[str | None] = mapped_column(String(255))
-    external_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     document = relationship("Document", back_populates="metadata_record")
-

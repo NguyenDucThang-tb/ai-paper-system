@@ -922,10 +922,12 @@ def create_graph_recommender_from_env(client=None) -> GraphRecommender:
     if client is None:
         from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
         neo4j_config = Neo4jConfig(
-            uri=      os.getenv("NEO4J_URI",      "bolt://localhost:7690"),
-            username= os.getenv("NEO4J_USER",     "neo4j"),
-            password= os.getenv("NEO4J_PASSWORD", "password"),
+            uri=      os.getenv("NEO4J_URI", ""),
+            username= os.getenv("NEO4J_USER", ""),
+            password= os.getenv("NEO4J_PASSWORD", ""),
         )
+        if not neo4j_config.uri or not neo4j_config.username or not neo4j_config.password:
+            raise ValueError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD")
         client = Neo4jClient(neo4j_config)
         client.connect()
 

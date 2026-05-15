@@ -1,0 +1,37 @@
+                                                                          Table "public.document_metadata"
+       Column        |           Type           | Collation | Nullable |                       Default                        | Storage  | Compression | Stats target | Description 
+---------------------+--------------------------+-----------+----------+------------------------------------------------------+----------+-------------+--------------+-------------
+ id                  | integer                  |           | not null | nextval('public.document_metadata_id_seq'::regclass) | plain    |             |              | 
+ document_id         | integer                  |           | not null |                                                      | plain    |             |              | 
+ title               | character varying        |           |          |                                                      | extended |             |              | 
+ abstract            | text                     |           |          |                                                      | extended |             |              | 
+ publication_year    | integer                  |           |          |                                                      | plain    |             |              | 
+ source              | character varying        |           |          |                                                      | extended |             |              | 
+ language            | character varying        |           |          |                                                      | extended |             |              | 
+ authors             | json                     |           |          |                                                      | extended |             |              | 
+ keywords            | json                     |           |          |                                                      | extended |             |              | 
+ topics              | json                     |           |          |                                                      | extended |             |              | 
+ methods             | json                     |           |          |                                                      | extended |             |              | 
+ doi                 | character varying        |           |          |                                                      | extended |             |              | 
+ external_url        | character varying        |           |          |                                                      | extended |             |              | 
+ created_at          | timestamp with time zone |           |          | now()                                                | plain    |             |              | 
+ updated_at          | timestamp with time zone |           |          | now()                                                | plain    |             |              | 
+ page_count          | integer                  |           |          |                                                      | plain    |             |              | 
+ publisher           | text                     |           |          |                                                      | extended |             |              | 
+ volume              | character varying(64)    |           |          |                                                      | extended |             |              | 
+ issue               | character varying(64)    |           |          |                                                      | extended |             |              | 
+ pages               | character varying(64)    |           |          |                                                      | extended |             |              | 
+ citation_count      | integer                  |           |          |                                                      | plain    |             |              | 
+ metadata_confidence | double precision         |           |          |                                                      | plain    |             |              | 
+ ingestion_version   | character varying(64)    |           |          |                                                      | extended |             |              | 
+Indexes:
+    "document_metadata_pkey" PRIMARY KEY, btree (id)
+    "ix_document_metadata_doi" btree (doi) WHERE doi IS NOT NULL
+    "ix_document_metadata_id" btree (id)
+    "ix_document_metadata_publication_year" btree (publication_year)
+    "ix_document_metadata_title_trgm_hint" btree ("left"(title::text, 128))
+    "uq_document_metadata_document_id" UNIQUE CONSTRAINT, btree (document_id)
+Foreign-key constraints:
+    "document_metadata_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+Access method: heap
+

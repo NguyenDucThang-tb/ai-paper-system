@@ -1,0 +1,43 @@
+                                                                         Table "public.documents"
+      Column       |           Type           | Collation | Nullable |                   Default                    | Storage  | Compression | Stats target | Description 
+-------------------+--------------------------+-----------+----------+----------------------------------------------+----------+-------------+--------------+-------------
+ id                | integer                  |           | not null | nextval('public.documents_id_seq'::regclass) | plain    |             |              | 
+ filename          | character varying        |           | not null |                                              | extended |             |              | 
+ file_type         | character varying        |           | not null |                                              | extended |             |              | 
+ raw_text          | text                     |           |          |                                              | extended |             |              | 
+ status            | character varying        |           | not null |                                              | extended |             |              | 
+ user_id           | integer                  |           |          |                                              | plain    |             |              | 
+ created_at        | timestamp with time zone |           |          | now()                                        | plain    |             |              | 
+ is_deleted        | boolean                  |           |          |                                              | plain    |             |              | 
+ workspace_id      | integer                  |           |          |                                              | plain    |             |              | 
+ doc_id            | character varying(255)   |           |          |                                              | extended |             |              | 
+ source_type       | character varying(32)    |           |          |                                              | extended |             |              | 
+ source_file_uri   | text                     |           |          |                                              | extended |             |              | 
+ ingestion_version | character varying(64)    |           |          |                                              | extended |             |              | 
+ updated_at        | timestamp with time zone |           | not null | now()                                        | plain    |             |              | 
+Indexes:
+    "documents_pkey" PRIMARY KEY, btree (id)
+    "ix_documents_id" btree (id)
+    "ix_documents_source_type" btree (source_type)
+    "ix_documents_status_created_at" btree (status, created_at)
+    "ix_documents_updated_at" btree (updated_at DESC)
+    "ix_documents_user_workspace_created_at" btree (user_id, workspace_id, created_at)
+    "ix_documents_workspace_id" btree (workspace_id)
+    "uq_documents_doc_id" UNIQUE, btree (doc_id) WHERE doc_id IS NOT NULL
+Check constraints:
+    "ck_documents_status_valid" CHECK (status::text = ANY (ARRAY['uploaded'::character varying, 'extracting'::character varying, 'chunking'::character varying, 'embedding'::character varying, 'graphing'::character varying, 'processing'::character varying, 'parsed'::character varying, 'building_graph'::character varying, 'processed'::character varying, 'indexed'::character varying, 'failed'::character varying]::text[]))
+Foreign-key constraints:
+    "documents_user_id_fkey" FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE
+    "fk_documents_workspace_id_workspaces" FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE SET NULL
+Referenced by:
+    TABLE "public.document_artifacts" CONSTRAINT "document_artifacts_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+    TABLE "public.document_chunks" CONSTRAINT "document_chunks_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+    TABLE "public.document_graphs" CONSTRAINT "document_graphs_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+    TABLE "public.document_jobs" CONSTRAINT "document_jobs_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+    TABLE "public.document_metadata" CONSTRAINT "document_metadata_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+    TABLE "public.document_recommendations" CONSTRAINT "document_recommendations_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+    TABLE "public.document_recommendations" CONSTRAINT "document_recommendations_recommended_document_id_fkey" FOREIGN KEY (recommended_document_id) REFERENCES public.documents(id) ON DELETE SET NULL
+    TABLE "public.document_summaries" CONSTRAINT "document_summaries_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+    TABLE "public.qa_history" CONSTRAINT "qa_history_document_id_fkey" FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE
+Access method: heap
+

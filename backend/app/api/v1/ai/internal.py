@@ -30,9 +30,8 @@ _RAG_SESSIONS: dict[str, list[dict[str, str]]] = {}
 
 class SummaryPayload(BaseModel):
     job_id: int | None = None
-    summary_short: str | None = None
-    summary_medium: str | None = None
-    summary_long: str | None = None
+    summary_style: str = "academic"
+    summary: str | None = None
 
 class QAResultPayload(BaseModel):
     job_id: int | None = None
@@ -266,11 +265,12 @@ def save_summary(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
+    style = normalize_summary_style(payload.summary_style)
+    summary_text = (payload.summary or "").strip()
     summary = DocumentSummary(
         document_id=document_id,
-        summary_short=payload.summary_short,
-        summary_medium=payload.summary_medium,
-        summary_long=payload.summary_long,
+        summary_style=style,
+        summary=summary_text or None,
     )
 
     db.add(summary)
@@ -281,9 +281,8 @@ def save_summary(
         db,
         payload.job_id,
         {
-            "summary_short": payload.summary_short,
-            "summary_medium": payload.summary_medium,
-            "summary_long": payload.summary_long,
+            "summary": summary_text,
+            "summary_style": style,
         },
     )
 

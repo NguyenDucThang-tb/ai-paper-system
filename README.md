@@ -1,119 +1,68 @@
 # PaperMind
 
-PaperMind là hệ thống quản lý bài báo khoa học có tích hợp AI:
-- Upload và quản lý tài liệu theo workspace (sổ tay).
-- Tóm tắt tài liệu theo nhiều phong cách.
-- Hỏi đáp theo ngữ cảnh tài liệu (RAG).
-- Gợi ý tài liệu theo tác giả / method từ Neo4j recommendation graph.
+PaperMind là hệ thống quản lý bài báo khoa học tích hợp AI (RAG + KG + recommendation).
 
-## Kiến trúc chính
+## Kiến trúc
 
 - `frontend`: React + Vite
 - `backend`: FastAPI
-- `neo4j-user`: lưu graph tài liệu người dùng (mới hoàn toàn)
-- `neo4j-rec`: graph recommendation toàn cục (load từ `neo4j.dump`)
+- `Neo4j Aura`: user-doc graph + recommendation graph
+- `PostgreSQL`: metadata và dữ liệu nghiệp vụ
 
-## Cổng dịch vụ (local)
+## Yêu cầu môi trường
 
-- Frontend: `http://localhost:5173`
-- Backend API: `http://localhost:8000/api/v1`
-- Backend docs: `http://localhost:8000/docs`
-- Neo4j User (Browser): `http://localhost:7476`
-- Neo4j User (Bolt): `bolt://localhost:7689`
-- Neo4j Recommendation (Browser): `http://localhost:7477`
-- Neo4j Recommendation (Bolt): `bolt://localhost:7690`
+- Node.js 20+
+- Python 3.11+
+- PostgreSQL đang hoạt động
+- 2 Neo4j Aura instance (hoặc 2 database) đã tạo sẵn
 
-## Chuẩn bị môi trường
+## Cấu hình
 
-1. Cài Docker + Docker Compose.
-2. Đảm bảo file dump recommendation tồn tại:
-   - `/home/nguyenducthang/neo4j.dump`
-3. Cấu hình env backend:
-   - `backend/.env`
-
-Ví dụ biến Neo4j quan trọng:
+Tạo `backend/.env` từ `backend/.env.example` và điền tối thiểu:
 
 ```env
-NEO4J_URI=bolt://neo4j-user:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=password
-NEO4J_DATABASE=neo4j
+DATABASE_URL=postgresql://...
+SECRET_KEY=...
+INTERNAL_API_TOKEN=...
 
-NEO4J_REC_URI=bolt://neo4j-rec:7687
-NEO4J_REC_USER=neo4j
-NEO4J_REC_PASSWORD=password
-NEO4J_REC_DATABASE=neo4j
+NEO4J_URI=neo4j+s://<aura-user-doc>.databases.neo4j.io
+NEO4J_USER=<username>
+NEO4J_PASSWORD=<password>
+NEO4J_DATABASE=<database>
+NEO4J_USER_DOC_DB=<database>
+
+NEO4J_REC_URI=neo4j+s://<aura-rec>.databases.neo4j.io
+NEO4J_REC_USER=<username>
+NEO4J_REC_PASSWORD=<password>
+NEO4J_REC_DATABASE=<database>
 ```
 
-## Chạy bằng Docker
+## Chạy local (không Docker)
 
-Từ thư mục dự án:
+Backend:
 
 ```bash
-cd ~/ai-paper-system
-
-# Build + chạy toàn bộ
-Docker compose up -d --build
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Kiểm tra trạng thái:
+Frontend:
 
 ```bash
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+cd frontend
+npm install
+npm run dev
 ```
 
-## Rebuild nhanh khi đổi code
+## API quan trọng
 
-- Rebuild backend + frontend:
-
-```bash
-docker compose up -d --build backend frontend
-```
-
-- Đảm bảo 2 Neo4j đang chạy:
-
-```bash
-docker compose up -d neo4j-user neo4j-rec
-```
-
-## Recommendation flow (backend)
-
-Endpoint:
-
-- `GET /api/v1/cms/documents/{document_id}/recommendations`
-
-Pipeline ưu tiên:
-
-1. Entity-based (`author + method`) từ artifact JSON.
-2. Fallback theo author.
-3. Fallback graph recommender (seed từ DOI/title).
-4. Last resort metadata nội bộ.
-
-Response item có `recommendation_type` để frontend tách tab:
-- `author`
-- `method`
-
-## Một số lệnh hữu ích
-
-- Log backend:
-
-```bash
-docker logs -f ai-paper-backend
-```
-
-- Kiểm tra Neo4j user trống:
-
-```bash
-docker exec ai-paper-neo4j-user cypher-shell -u neo4j -p password "MATCH (n) RETURN count(n) AS nodes"
-```
-
-- Kiểm tra Neo4j recommendation có dữ liệu:
-
-```bash
-docker exec ai-paper-neo4j-rec cypher-shell -u neo4j -p password "MATCH (p:Paper) RETURN count(p) AS papers"
-```
+- Docs: `http://127.0.0.1:8000/docs`
+- Recommendation: `GET /api/v1/cms/documents/{document_id}/recommendations`
 
 ## Lưu ý
 
-- Không commit secret thật trong `.env`.
-- Nếu thay đổi schema DB, chạy migration tương ứng trước khi deploy.
+- Repo đã bỏ Docker/Compose cho Neo4j, chỉ dùng Neo4j Aura qua biến `NEO4J_*`.
+- Không commit secret thật trong file env.

@@ -14,7 +14,7 @@ This document is the single relational DB contract for backend, frontend, and wo
 - `document_artifacts` (1:N): pointer registry (`uri`) to heavy ingestion artifacts (unified JSON, sections/tables/formulas/references files, figures dir).
 - `document_index_status` (1:1): vector/graph indexing runtime state (collection name, chunk_count, timestamps, last_error).
 - `document_chunks` (1:N, deprecated for heavy payload): keep only if a local fallback is needed.
-- `document_summaries` (1:N snapshots): short/medium/long summary versions.
+- `document_summaries` (1:N snapshots): summary content in `summary` (scoped by `summary_style`).
 - `document_graphs` (1:1 snapshot, deprecated for heavy payload): prefer Neo4j or artifact files.
 - `document_recommendations` (1:N): internal/external recommendations.
 - `qa_history` (N): Q&A logs per user/document.

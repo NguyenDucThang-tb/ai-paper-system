@@ -79,7 +79,13 @@ def get_latest_summary(db: Session, document_id: int, summary_style: str | None 
         if summary_style:
             query = query.filter(DocumentSummary.summary_style == normalize_summary_style(summary_style))
         return query.order_by(DocumentSummary.created_at.desc(), DocumentSummary.id.desc()).first()
-    except ProgrammingError:
+    except ProgrammingError as ex:
+        logger.warning(
+            "summary_query_programming_error document_id=%s summary_style=%s error=%s",
+            document_id,
+            summary_style,
+            str(ex),
+        )
         db.rollback()
         return None
 
@@ -149,32 +155,31 @@ def _save_summary_row(
     document_id: int,
     summary_text: str,
     summary_style: str = "academic",
-) -> None:
+) -> DocumentSummary:
     try:
         style = normalize_summary_style(summary_style)
         latest = get_latest_summary(db, document_id, style)
         if latest:
             latest.summary_style = style
-            latest.summary_short = summary_text[:400]
-            latest.summary_medium = summary_text
-            latest.summary_long = summary_text
+            latest.summary = summary_text
+            row = latest
         else:
             row = DocumentSummary(
                 document_id=document_id,
                 summary_style=style,
-                summary_short=summary_text[:400],
-                summary_medium=summary_text,
-                summary_long=summary_text,
+                summary=summary_text,
             )
             db.add(row)
         db.commit()
+        db.refresh(row)
+        return row
     except SQLAlchemyError as ex:
         db.rollback()
         # Some deployments may not have the document_summaries table yet.
         # Do not fail summary generation for this persistence issue.
         msg = str(ex).lower()
         if "document_summaries" in msg and "does not exist" in msg:
-            return
+            raise RuntimeError("Summary table does not exist.")
         raise RuntimeError(f"Failed to save summary to database: {ex}") from ex
 
 
@@ -325,11 +330,13 @@ def _build_kg_with_ai_module(doc_json: dict) -> tuple[list[dict], list[dict]]:
         language=doc_json.get("language"),
     )
     cfg = Neo4jConfig(
-        uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-        username=os.getenv("NEO4J_USER", "neo4j"),
-        password=os.getenv("NEO4J_PASSWORD", "password"),
-        database=os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j")),
+        uri=os.getenv("NEO4J_URI", "").strip(),
+        username=os.getenv("NEO4J_USER", "").strip(),
+        password=os.getenv("NEO4J_PASSWORD", "").strip(),
+        database=os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
     )
+    if not cfg.uri or not cfg.username or not cfg.password:
+        raise RuntimeError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD")
     client = Neo4jClient(cfg)
     client.connect()
     try:
@@ -521,11 +528,13 @@ def _compute_neo4j_graph_recommendations(
     from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
 
     cfg = Neo4jConfig(
-        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "bolt://neo4j-rec:7687")),
-        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "neo4j")),
-        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "password")),
-        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")),
+        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
+        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "")).strip(),
+        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
+        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
     )
+    if not cfg.uri or not cfg.username or not cfg.password:
+        return []
     meta = document.metadata_record
     title = str(meta.title).strip() if meta and meta.title else str(document.filename or "").strip()
     doi = str(meta.doi).strip() if meta and meta.doi else ""
@@ -655,11 +664,13 @@ def _compute_neo4j_author_recommendations(
     from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
 
     cfg = Neo4jConfig(
-        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "bolt://neo4j-rec:7687")),
-        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "neo4j")),
-        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "password")),
-        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")),
+        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
+        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "")).strip(),
+        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
+        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
     )
+    if not cfg.uri or not cfg.username or not cfg.password:
+        return []
     client = Neo4jClient(cfg)
     client.connect()
     try:
@@ -782,11 +793,13 @@ def _compute_neo4j_entity_recommendations(
         return []
 
     cfg = Neo4jConfig(
-        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "bolt://neo4j-rec:7687")),
-        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "neo4j")),
-        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "password")),
-        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")),
+        uri=os.getenv("NEO4J_REC_URI", os.getenv("NEO4J_URI", "")).strip(),
+        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_USER", "")).strip(),
+        password=os.getenv("NEO4J_REC_PASSWORD", os.getenv("NEO4J_PASSWORD", "")).strip(),
+        database=os.getenv("NEO4J_REC_DATABASE", os.getenv("NEO4J_DATABASE", "neo4j")).strip(),
     )
+    if not cfg.uri or not cfg.username or not cfg.password:
+        return []
     client = Neo4jClient(cfg)
     client.connect()
     try:
@@ -1072,7 +1085,37 @@ def _request_summary_by_style(
             "summary_text": None,
         }
 
-    _save_summary_row(db, document.id, text, summary_style=summary_style)
+    try:
+        saved_row = _save_summary_row(db, document.id, text, summary_style=summary_style)
+    except Exception as ex:
+        job.status = "failed"
+        job.error_message = str(ex)
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "document_id": document.id,
+            "question": f"summary:{level}:{summary_style}",
+            "status": "failed",
+            "job_id": job.id,
+            "message": "Không lưu được nội dung tóm tắt.",
+            "summary_style": normalize_summary_style(summary_style),
+            "summary_text": None,
+        }
+
+    if not (saved_row and str(saved_row.summary or "").strip()):
+        job.status = "failed"
+        job.error_message = "Summary persisted as empty."
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "document_id": document.id,
+            "question": f"summary:{level}:{summary_style}",
+            "status": "failed",
+            "job_id": job.id,
+            "message": "Nội dung tóm tắt rỗng sau khi lưu.",
+            "summary_style": normalize_summary_style(summary_style),
+            "summary_text": None,
+        }
     job.status = "done"
     job.result = {
         "summary_preview": text[:500],
@@ -1164,12 +1207,18 @@ def get_summary(
     summary = get_latest_summary(db, document.id, normalized_style)
     if summary:
         return {
+            "id": summary.id,
             "document_id": document.id,
-            "summary_short": summary.summary_short,
-            "summary_medium": summary.summary_medium,
-            "summary_long": summary.summary_long,
+            "summary_type": summary.summary_style,
+            "summary": summary.summary,
             "created_at": summary.created_at,
         }
+    logger.info(
+        "summary_not_found_in_table document_id=%s summary_style=%s query_result=%s",
+        document.id,
+        normalized_style,
+        None,
+    )
     latest_summary_job = (
         db.query(DocumentJob)
         .filter(
@@ -1213,12 +1262,18 @@ def get_summary(
         ).strip()
         if text:
             return {
+                "id": None,
                 "document_id": document.id,
-                "summary_short": text[:400],
-                "summary_medium": text,
-                "summary_long": text,
+                "summary_type": normalized_style or normalize_summary_style(str(latest_summary_job.result.get("summary_style") or "academic")),
+                "summary": text,
                 "created_at": latest_summary_job.completed_at,
             }
+    logger.info(
+        "summary_not_found document_id=%s summary_style=%s job_result=%s",
+        document.id,
+        normalized_style,
+        latest_summary_job.result if latest_summary_job and isinstance(latest_summary_job.result, dict) else None,
+    )
     raise HTTPException(status_code=404, detail="Summary not found")
 
 

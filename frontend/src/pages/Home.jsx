@@ -14,8 +14,12 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import SessionActionMenu from "@/components/cms/SessionActionMenu";
+import RenameSessionDialog from "@/components/cms/RenameSessionDialog";
+import DeleteSessionDialog from "@/components/cms/DeleteSessionDialog";
 import { api } from "@/lib/api";
 import { mapApiWorkspaces } from "@/lib/workspaceMapper";
+import { deleteSession, renameSession } from "@/services/cmsService";
 
 const notebookStyles = [
   { icon: BookOpen, accent: "bg-[#eef1fb]", iconColor: "text-violet-700" },
@@ -45,7 +49,7 @@ function NotebookCard({ workspace, index, menuOpen, onToggleMenu, onRename, onDe
     <div className={`group relative min-h-[210px] rounded-lg p-7 text-left transition hover:-translate-y-0.5 hover:shadow-md ${style.accent}`}>
       <div className="flex items-start justify-between">
         <Icon className={`h-12 w-12 ${style.iconColor}`} strokeWidth={1.8} />
-        <div className="relative">
+        <div className="relative z-20">
           <button
             type="button"
             onClick={(event) => {
@@ -57,32 +61,19 @@ function NotebookCard({ workspace, index, menuOpen, onToggleMenu, onRename, onDe
           >
             <MoreVertical className="h-5 w-5" />
           </button>
-          {menuOpen ? (
-            <div className="absolute right-0 z-20 mt-1 w-36 rounded-md border border-zinc-200 bg-white p-1 shadow">
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onRename(workspace);
-                }}
-                className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-zinc-100"
-              >
-                Sửa tên
-              </button>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onDelete(workspace);
-                }}
-                className="block w-full rounded px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
-              >
-                Xóa sổ tay
-              </button>
-            </div>
-          ) : null}
+          <SessionActionMenu
+            open={menuOpen}
+            onRename={(event) => {
+              event?.preventDefault?.();
+              event?.stopPropagation?.();
+              onRename(workspace);
+            }}
+            onDelete={(event) => {
+              event?.preventDefault?.();
+              event?.stopPropagation?.();
+              onDelete(workspace);
+            }}
+          />
         </div>
       </div>
       <Link to={`/workspace/${workspace.id}`} className="absolute inset-0 z-10" aria-label={workspace.title || "Sổ tay"} />
@@ -103,7 +94,13 @@ export default function UserHomePage() {
   const [apiNote, setApiNote] = useState("");
   const [creating, setCreating] = useState(false);
   const [menuWorkspaceId, setMenuWorkspaceId] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [renameTarget, setRenameTarget] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [savingRename, setSavingRename] = useState(false);
+  const [deletingSession, setDeletingSession] = useState(false);
   const creatingRef = useRef(false);
+  const menuAreaRef = useRef(null);
 
   useEffect(() => {
     async function loadNotebooks() {
@@ -117,6 +114,27 @@ export default function UserHomePage() {
     }
     loadNotebooks();
   }, []);
+
+  useEffect(() => {
+    const onClickOutside = (event) => {
+      if (!menuAreaRef.current?.contains(event.target)) setMenuWorkspaceId(null);
+    };
+    const onEscape = (event) => {
+      if (event.key === "Escape") setMenuWorkspaceId(null);
+    };
+    window.addEventListener("mousedown", onClickOutside);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("mousedown", onClickOutside);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const t = setTimeout(() => setToast(null), 2400);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   const filteredWorkspaces = useMemo(() => {
     if (!query.trim()) return workspaces;
@@ -141,39 +159,52 @@ export default function UserHomePage() {
     }
   }
 
-  async function refreshWorkspaces() {
-    try {
-      const response = await api.listWorkspaces({ page_size: 12 });
-      setWorkspaces(mapApiWorkspaces(response, []));
-    } catch {
-      // Keep current list if refresh fails.
-    }
+  function handleRenameWorkspace(workspace) {
+    setMenuWorkspaceId(null);
+    setRenameTarget(workspace);
   }
 
-  async function handleRenameWorkspace(workspace) {
-    setMenuWorkspaceId(null);
+  async function submitRenameWorkspace(nextTitle) {
+    const workspace = renameTarget;
     const current = String(workspace?.title || "").trim();
-    const nextTitle = window.prompt("Nhập tên sổ tay mới", current);
-    if (!nextTitle) return;
-    const clean = String(nextTitle).trim();
-    if (!clean || clean === current) return;
+    if (!workspace?.id) return;
+    if (!nextTitle || nextTitle === current) {
+      setRenameTarget(null);
+      return;
+    }
+    setSavingRename(true);
     try {
-      await api.updateWorkspace(workspace.id, { title: clean });
-      await refreshWorkspaces();
+      await renameSession(workspace.id, nextTitle);
+      setWorkspaces((prev) => prev.map((item) => (item.id === workspace.id ? { ...item, title: nextTitle } : item)));
+      setToast({ type: "success", text: "Đã đổi tên phiên làm việc." });
+      setRenameTarget(null);
     } catch (err) {
       setApiNote(err.message || "Không đổi được tên sổ tay.");
+      setToast({ type: "error", text: "Không thể đổi tên phiên làm việc. Vui lòng thử lại." });
+    } finally {
+      setSavingRename(false);
     }
   }
 
-  async function handleDeleteWorkspace(workspace) {
+  function handleDeleteWorkspace(workspace) {
     setMenuWorkspaceId(null);
-    const ok = window.confirm(`Xóa sổ tay \"${workspace?.title || workspace?.id}\"?`);
-    if (!ok) return;
+    setDeleteTarget(workspace);
+  }
+
+  async function submitDeleteWorkspace() {
+    const workspace = deleteTarget;
+    if (!workspace?.id) return;
+    setDeletingSession(true);
     try {
-      await api.deleteWorkspace(workspace.id);
-      await refreshWorkspaces();
+      await deleteSession(workspace.id);
+      setWorkspaces((prev) => prev.filter((item) => item.id !== workspace.id));
+      setToast({ type: "success", text: "Đã xóa phiên làm việc." });
+      setDeleteTarget(null);
     } catch (err) {
       setApiNote(err.message || "Không xóa được sổ tay.");
+      setToast({ type: "error", text: "Không thể xóa phiên làm việc. Vui lòng thử lại." });
+    } finally {
+      setDeletingSession(false);
     }
   }
 
@@ -189,6 +220,11 @@ export default function UserHomePage() {
       </header>
 
       <main className="mx-auto max-w-[1500px] px-6 py-10 lg:px-8">
+        {toast ? (
+          <div className={`mb-4 rounded-lg px-4 py-3 text-sm ${toast.type === "error" ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-700"}`}>
+            {toast.text}
+          </div>
+        ) : null}
         <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-wrap items-center gap-3">
             <div className="relative">
@@ -210,7 +246,7 @@ export default function UserHomePage() {
         <section className="mt-10">
           <h1 className="text-3xl font-medium tracking-normal">Sổ ghi chú gần đây</h1>
           {apiNote && <p className="mt-3 text-sm text-amber-700">{apiNote}</p>}
-          <div className="mt-6 grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
+          <div ref={menuAreaRef} className="mt-6 grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
             <button
               onClick={handleCreateWorkspace}
               disabled={creating}
@@ -235,6 +271,19 @@ export default function UserHomePage() {
           </div>
         </section>
       </main>
+      <RenameSessionDialog
+        open={Boolean(renameTarget)}
+        workspace={renameTarget}
+        loading={savingRename}
+        onClose={() => !savingRename && setRenameTarget(null)}
+        onSave={submitRenameWorkspace}
+      />
+      <DeleteSessionDialog
+        open={Boolean(deleteTarget)}
+        loading={deletingSession}
+        onClose={() => !deletingSession && setDeleteTarget(null)}
+        onConfirm={submitDeleteWorkspace}
+      />
     </div>
   );
 }

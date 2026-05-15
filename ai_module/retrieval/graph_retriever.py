@@ -1212,7 +1212,7 @@ def create_graph_retriever_from_env() -> GraphRetriever:
     Tạo GraphRetriever từ biến môi trường.
 
     .env:
-        NEO4J_URI=bolt://localhost:7687
+        NEO4J_URI=neo4j+s://your-instance.databases.neo4j.io
         NEO4J_USER=neo4j
         NEO4J_PASSWORD=password
         NEO4J_USER_DOC_DB=user_doc_kg       # database cho KG user upload
@@ -1224,14 +1224,16 @@ def create_graph_retriever_from_env() -> GraphRetriever:
     import os
     from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
 
-    database = os.getenv("NEO4J_USER_DOC_DB", "user_doc_kg")
+    database = os.getenv("NEO4J_USER_DOC_DB", os.getenv("NEO4J_DATABASE", "neo4j"))
 
     neo4j_client = Neo4jClient(Neo4jConfig(
-        uri=      os.getenv("NEO4J_URI",      "bolt://localhost:7687"),
-        username= os.getenv("NEO4J_USER",     "neo4j"),
-        password= os.getenv("NEO4J_PASSWORD", "password"),
+        uri=      os.getenv("NEO4J_URI", ""),
+        username= os.getenv("NEO4J_USER", ""),
+        password= os.getenv("NEO4J_PASSWORD", ""),
         database= database,
     ))
+    if not neo4j_client.config.uri or not neo4j_client.config.username or not neo4j_client.config.password:
+        raise ValueError("Missing Aura Neo4j config: NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD")
     neo4j_client.connect()
 
     config = GraphRetrieverConfig(

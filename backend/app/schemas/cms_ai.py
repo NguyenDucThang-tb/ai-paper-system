@@ -9,10 +9,10 @@ class SummaryRequest(BaseModel):
 
 
 class SummaryResponse(BaseModel):
+    id: int | None = None
     document_id: int
-    summary_short: str | None = None
-    summary_medium: str | None = None
-    summary_long: str | None = None
+    summary_type: str | None = None
+    summary: str | None = None
     created_at: datetime | None = None
 
 

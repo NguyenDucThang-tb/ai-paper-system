@@ -90,9 +90,9 @@ class Neo4jMergeError(Exception):
 
 @dataclass
 class Neo4jConfig:
-    uri:                      str   = "bolt://localhost:7687"
-    username:                 str   = "neo4j"
-    password:                 str   = "password"
+    uri:                      str   = ""
+    username:                 str   = ""
+    password:                 str   = ""
     database:                 str   = "neo4j"
     max_connection_pool_size: int   = 50
     connection_timeout:       float = 30.0

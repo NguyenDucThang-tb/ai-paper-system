@@ -24,7 +24,7 @@ class Settings:
     GOOGLE_CLIENT_ID: str | None = os.getenv("GOOGLE_CLIENT_ID")
     GOOGLE_CLIENT_SECRET: str | None = os.getenv("GOOGLE_CLIENT_SECRET")
     GOOGLE_OAUTH_REDIRECT_URI: str | None = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
-    FRONTEND_APP_URL: str = os.getenv("FRONTEND_APP_URL", "http://127.0.0.1:5173")
+    FRONTEND_APP_URL: str = os.getenv("FRONTEND_APP_URL", "https://ai-paper-system.vercel.app")
     SMTP_HOST: str | None = os.getenv("SMTP_HOST")
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
     SMTP_USER: str | None = os.getenv("SMTP_USER")
@@ -48,7 +48,10 @@ class Settings:
 
     DATABASE_URL: str | None = os.getenv("DATABASE_URL")
     CORS_ALLOWED_ORIGINS: list[str] = _parse_csv_env(
-        os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+        os.getenv(
+            "CORS_ALLOWED_ORIGINS",
+            "https://ai-paper-system.vercel.app,https://triumphant-charisma-production-f2a9.up.railway.app",
+        )
     )
 
     def __init__(self):

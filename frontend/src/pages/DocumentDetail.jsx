@@ -4,21 +4,25 @@ import {
   BookOpen,
   FileText,
   Loader2,
-  MessageSquare,
   MoreVertical,
   PanelLeft,
   PanelRight,
   Plus,
   Search,
   Send,
-  Sparkles,
+  Trash2,
   User,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import AssistantMessage from "@/components/chat/AssistantMessage";
+import DeleteDocumentDialog from "@/components/cms/DeleteDocumentDialog";
+import SummaryRenderer from "@/components/summary/SummaryRenderer";
+import { cleanAnswerText } from "@/utils/answerCleaner";
 import { api } from "@/lib/api";
 import { mapApiDocument, mapApiDocuments } from "@/lib/documentMapper";
+import { deleteDocument } from "@/services/cmsService";
 
 const statusLabel = {
   uploaded: "Mới tải lên",
@@ -30,6 +34,9 @@ const statusLabel = {
   failed: "Lỗi xử lý",
 };
 
+const DEFAULT_LAYOUT = { left: 26, center: 44, right: 30 };
+const LAYOUT_STORAGE_KEY = "document_detail_layout_v1";
+
 function NotebookLogo() {
   return (
     <div className="flex h-12 w-12 items-center justify-center rounded-full bg-black text-white">
@@ -38,12 +45,10 @@ function NotebookLogo() {
   );
 }
 
-function SourceItem({ doc, active, onSelect }) {
+function SourceItem({ doc, active, onSelect, onDelete }) {
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(doc)}
-      className={`block rounded-lg border p-3 transition hover:border-zinc-500 ${
+    <div
+      className={`group block rounded-lg border p-3 transition hover:border-zinc-500 ${
         active ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white"
       }`}
     >
@@ -51,29 +56,31 @@ function SourceItem({ doc, active, onSelect }) {
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[#eef1fb] text-violet-700">
           <FileText className="h-4 w-4" />
         </div>
-        <div className="min-w-0">
+        <button type="button" onClick={() => onSelect(doc)} className="min-w-0 flex-1 text-left">
           <p className="truncate text-sm font-medium text-zinc-900">{doc.title}</p>
           <p className="mt-1 text-xs text-zinc-500">{doc.type || "FILE"} · {statusLabel[doc.status] || doc.status}</p>
-        </div>
+        </button>
+        <button
+          type="button"
+          onClick={() => onDelete(doc)}
+          className="opacity-0 transition group-hover:opacity-100 rounded p-1 text-red-500 hover:bg-red-50"
+          aria-label="Xóa tài liệu"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
       </div>
-    </button>
+    </div>
   );
-}
-
-function stripSourcesFromAnswer(raw) {
-  const text = String(raw || "").trim();
-  if (!text) return "";
-  const marker = text.toLowerCase().lastIndexOf("nguồn:");
-  if (marker < 0) return text;
-  return text.slice(0, marker).trim();
 }
 
 function mapQaRow(item) {
   return {
+    id: item.id || `${item.created_at || Date.now()}-${Math.random()}`,
     question: item.question,
-    answer: stripSourcesFromAnswer(item.answer),
+    answer: cleanAnswerText(item.answer),
     createdAt: item.created_at || null,
     pending: false,
+    status: "done",
   };
 }
 
@@ -100,8 +107,11 @@ export default function DocumentDetailPage() {
   const [qaItems, setQaItems] = useState([]);
   const [summary, setSummary] = useState(null);
   const [summaryByStyle, setSummaryByStyle] = useState({});
+  const [summaryError, setSummaryError] = useState("");
   const [summaryStyle, setSummaryStyle] = useState("academic");
   const [recommendations, setRecommendations] = useState([]);
+  const [recommendationLoading, setRecommendationLoading] = useState(false);
+  const [recommendationError, setRecommendationError] = useState("");
   const [question, setQuestion] = useState("");
   const [sourceQuery, setSourceQuery] = useState("");
   const [message, setMessage] = useState("");
@@ -109,7 +119,28 @@ export default function DocumentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [recommendationMode, setRecommendationMode] = useState("author");
   const [systemMessages, setSystemMessages] = useState([]);
+  const [deletingDocument, setDeletingDocument] = useState(false);
+  const [deleteDocumentTarget, setDeleteDocumentTarget] = useState(null);
+  const [panelSizes, setPanelSizes] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
+      if (!raw) return DEFAULT_LAYOUT;
+      const parsed = JSON.parse(raw);
+      if (
+        Number.isFinite(parsed?.left) &&
+        Number.isFinite(parsed?.center) &&
+        Number.isFinite(parsed?.right)
+      ) {
+        return parsed;
+      }
+      return DEFAULT_LAYOUT;
+    } catch {
+      return DEFAULT_LAYOUT;
+    }
+  });
   const qaEndRef = useRef(null);
+  const layoutRef = useRef(null);
+  const dragStateRef = useRef(null);
   const activePollersRef = useRef(new Set());
   const notifiedReadyRef = useRef(new Set());
   const notifiedFailedRef = useRef(new Set());
@@ -130,6 +161,86 @@ export default function DocumentDetailPage() {
   useEffect(() => {
     qaEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [qaItems.length]);
+
+  useEffect(() => {
+    if (!document?.id) return;
+    loadDocumentFeatures(document.id, summaryStyle, { includeRecommendations: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summaryStyle, document?.id]);
+
+  useEffect(() => {
+    localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(panelSizes));
+  }, [panelSizes]);
+
+  useEffect(() => {
+    const onMouseMove = (event) => {
+      const drag = dragStateRef.current;
+      const container = layoutRef.current;
+      if (!drag || !container) return;
+      const rect = container.getBoundingClientRect();
+      if (!rect.width) return;
+      const totalPx = rect.width;
+      const deltaPx = event.clientX - drag.startX;
+      const deltaPercent = (deltaPx / totalPx) * 100;
+
+      const minLeft = (300 / totalPx) * 100;
+      const minCenter = (460 / totalPx) * 100;
+      const minRight = (340 / totalPx) * 100;
+
+      if (drag.divider === "left") {
+        let nextLeft = drag.startSizes.left + deltaPercent;
+        let nextCenter = drag.startSizes.center - deltaPercent;
+        nextLeft = Math.max(minLeft, nextLeft);
+        nextCenter = Math.max(minCenter, nextCenter);
+        const adjustedLeft = 100 - drag.startSizes.right - nextCenter;
+        const adjustedCenter = 100 - drag.startSizes.right - nextLeft;
+        if (nextLeft !== adjustedLeft) nextLeft = adjustedLeft;
+        if (nextCenter !== adjustedCenter) nextCenter = adjustedCenter;
+        setPanelSizes({
+          left: nextLeft,
+          center: nextCenter,
+          right: drag.startSizes.right,
+        });
+      } else {
+        let nextCenter = drag.startSizes.center + deltaPercent;
+        let nextRight = drag.startSizes.right - deltaPercent;
+        nextCenter = Math.max(minCenter, nextCenter);
+        nextRight = Math.max(minRight, nextRight);
+        const adjustedCenter = 100 - drag.startSizes.left - nextRight;
+        const adjustedRight = 100 - drag.startSizes.left - nextCenter;
+        if (nextCenter !== adjustedCenter) nextCenter = adjustedCenter;
+        if (nextRight !== adjustedRight) nextRight = adjustedRight;
+        setPanelSizes({
+          left: drag.startSizes.left,
+          center: nextCenter,
+          right: nextRight,
+        });
+      }
+    };
+
+    const onMouseUp = () => {
+      dragStateRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
+
+  function startResize(divider, event) {
+    dragStateRef.current = {
+      divider,
+      startX: event.clientX,
+      startSizes: panelSizes,
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
 
   function pushSystemMessage(content, variant = "info") {
     setSystemMessages((prev) => {
@@ -280,17 +391,23 @@ export default function DocumentDetailPage() {
   }
 
   async function getRecommendations(documentId) {
+    setRecommendationLoading(true);
+    setRecommendationError("");
     try {
       const response = await api.getRecommendations(documentId);
       return response?.items || [];
     } catch (error) {
       console.error("getRecommendations failed", error);
+      setRecommendationError("Không thể tải gợi ý tài liệu. Vui lòng thử lại sau.");
       return [];
+    } finally {
+      setRecommendationLoading(false);
     }
   }
 
   async function loadDocumentFeatures(documentId, style = "academic", options = {}) {
     const { includeRecommendations = true } = options;
+    let qaRows = [];
     const [qaResponse, summaryResponse] = await Promise.allSettled([
       api.getQaHistory(documentId),
       api.getSummary(documentId, style),
@@ -303,17 +420,26 @@ export default function DocumentDetailPage() {
         const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
         return ta - tb;
       });
+      qaRows = rows;
       setQaItems(rows);
     } else {
+      qaRows = [];
       setQaItems([]);
     }
-    const summaryValue = summaryResponse.status === "fulfilled" ? summaryResponse.value : null;
-    setSummary(summaryValue);
-    setSummaryByStyle((prev) => ({ ...prev, [style]: summaryValue }));
+    let summaryValue = summaryResponse.status === "fulfilled" ? summaryResponse.value : null;
+    let summaryFetchError = summaryResponse.status === "rejected";
+    const summaryText = String(summaryValue?.summary || "").trim();
+
+    setSummaryError(summaryFetchError ? "Không thể tải nội dung tóm tắt." : "");
+    if (summaryValue && summaryText) {
+      setSummary(summaryValue);
+      const styleKey = String(summaryValue?.summary_type || style || "academic").toLowerCase();
+      setSummaryByStyle((prev) => ({ ...prev, [styleKey]: summaryValue }));
+    }
     if (includeRecommendations) {
       getRecommendations(documentId).then((items) => setRecommendations(items));
     }
-    return { summary: summaryValue };
+    return { summary: summaryValue, qaRows };
   }
 
   async function handleUploadSource(event) {
@@ -362,13 +488,11 @@ export default function DocumentDetailPage() {
     setBusy(`summary-${style}`);
     try {
       const response = await api.requestSummaryByStyle(document.id, style, level);
-      const immediateText = String(response?.summary_text || "").trim();
+      const immediateText = String(response?.summary_text || response?.summary || "").trim();
       if (immediateText) {
         const nextSummary = {
           document_id: document.id,
-          summary_short: immediateText.slice(0, 400),
-          summary_medium: immediateText,
-          summary_long: immediateText,
+          summary: immediateText,
           created_at: new Date().toISOString(),
         };
         setSummary(nextSummary);
@@ -382,9 +506,7 @@ export default function DocumentDetailPage() {
           if (text) {
             const nextSummary = {
               document_id: document.id,
-              summary_short: text.slice(0, 400),
-              summary_medium: text,
-              summary_long: text,
+              summary: text,
               created_at: new Date().toISOString(),
             };
             setSummary(nextSummary);
@@ -401,6 +523,8 @@ export default function DocumentDetailPage() {
             ? response.message || "Không tạo được tóm tắt."
             : "Đã nhận yêu cầu tóm tắt.",
       );
+      // Force one more fetch to avoid stale UI after generation.
+      await loadDocumentFeatures(document.id, style, { includeRecommendations: false });
     } catch (err) {
       setMessage(err.message || "Không tạo được tóm tắt.");
     } finally {
@@ -416,12 +540,16 @@ export default function DocumentDetailPage() {
       setMessage("Hệ thống đang xử lý xây dựng đồ thị. Vui lòng đợi tài liệu ở trạng thái Sẵn sàng rồi hỏi đáp.");
       return;
     }
+    const optimisticId = crypto.randomUUID();
+    setQuestion("");
     setBusy("qa");
     const optimisticItem = {
+      id: optimisticId,
       question: cleanQuestion,
-      answer: "AI đang suy luận câu trả lời từ nội dung đã ingest...",
+      answer: "AI đang xử lý câu trả lời...",
       createdAt: new Date().toISOString(),
       pending: true,
+      status: "loading",
     };
     setQaItems((prev) => [...prev, optimisticItem]);
     try {
@@ -434,33 +562,117 @@ export default function DocumentDetailPage() {
           const job = await api.getJobStatus(response.job_id);
           if (job?.status === "done") {
             finished = true;
-            await loadDocumentFeatures(document.id, summaryStyle, { includeRecommendations: false });
+            const features = await loadDocumentFeatures(document.id, summaryStyle, { includeRecommendations: false });
+            const latestAnswer = features?.qaRows?.length
+              ? features.qaRows[features.qaRows.length - 1]?.answer
+              : "";
+            setQaItems((prev) =>
+              prev.map((item) => (item.id === optimisticId
+                ? {
+                    ...item,
+                    answer: latestAnswer || "Không có câu trả lời.",
+                    pending: false,
+                    status: "done",
+                  }
+                : item)),
+            );
             setMessage("Đã trả lời câu hỏi.");
           } else if (job?.status === "failed") {
             finished = true;
-            setQaItems((prev) => prev.filter((item) => item !== optimisticItem));
+            setQaItems((prev) =>
+              prev.map((item) => (item.id === optimisticId
+                ? {
+                    ...item,
+                    answer: "Không thể trả lời câu hỏi lúc này. Vui lòng thử lại.",
+                    pending: false,
+                    status: "error",
+                  }
+                : item)),
+            );
             setMessage(job?.error_message || "Không trả lời được câu hỏi.");
           }
         }
         if (!finished) {
+          setQaItems((prev) =>
+            prev.map((item) => (item.id === optimisticId
+              ? {
+                  ...item,
+                  answer: "Không thể trả lời câu hỏi lúc này. Vui lòng thử lại.",
+                  pending: false,
+                  status: "error",
+                }
+              : item)),
+          );
           setMessage("Câu hỏi đang được xử lý, vui lòng đợi thêm.");
         }
       } else {
-        await loadDocumentFeatures(document.id, summaryStyle, { includeRecommendations: false });
+        const features = await loadDocumentFeatures(document.id, summaryStyle, { includeRecommendations: false });
+        const latestAnswer = features?.qaRows?.length
+          ? features.qaRows[features.qaRows.length - 1]?.answer
+          : "";
+        setQaItems((prev) =>
+          prev.map((item) => (item.id === optimisticId
+            ? {
+                ...item,
+                answer: latestAnswer || "Không có câu trả lời.",
+                pending: false,
+                status: response.status === "failed" ? "error" : "done",
+              }
+            : item)),
+        );
         setMessage(
           response.status === "done"
             ? "Đã trả lời câu hỏi."
             : response.status === "failed"
               ? response.message || "Không trả lời được câu hỏi."
-              : "Đã nhận câu hỏi.",
+            : "Đã nhận câu hỏi.",
         );
       }
-      setQuestion("");
     } catch (err) {
-      setQaItems((prev) => prev.filter((item) => item !== optimisticItem));
+      setQaItems((prev) =>
+        prev.map((item) => (item.id === optimisticId
+          ? {
+              ...item,
+              answer: "Không thể trả lời câu hỏi lúc này. Vui lòng thử lại.",
+              pending: false,
+              status: "error",
+            }
+          : item)),
+      );
       setMessage(err.message || "Không gửi được câu hỏi.");
     } finally {
       setBusy("");
+    }
+  }
+
+  async function handleDeleteSource() {
+    const target = deleteDocumentTarget;
+    if (!target?.id) return;
+    setDeletingDocument(true);
+    try {
+      await deleteDocument(target.id);
+      const nextSources = sources.filter((item) => String(item.id) !== String(target.id));
+      setSources(nextSources);
+      if (String(document?.id) === String(target.id)) {
+        const fallback = nextSources[0] || null;
+        if (fallback) {
+          setDocument(fallback);
+          await loadDocumentFeatures(fallback.id, summaryStyle);
+        } else {
+          setDocument({ ...emptyDocument, id: null, title: workspace?.title || "Untitled notebook" });
+          setQaItems([]);
+          setRecommendations([]);
+          setSummary(null);
+          setSummaryByStyle({});
+        }
+      }
+      setRecommendations([]);
+      setMessage("Đã xóa tài liệu.");
+      setDeleteDocumentTarget(null);
+    } catch (err) {
+      setMessage(err.message || "Không thể xóa tài liệu. Vui lòng thử lại.");
+    } finally {
+      setDeletingDocument(false);
     }
   }
 
@@ -473,10 +685,12 @@ export default function DocumentDetailPage() {
     return { author: byAuthor, method: byMethod };
   }, [recommendations]);
   const activeRecommendations = groupedRecommendations[recommendationMode] || [];
+  const isDocumentReady = isReadyStatus(document?.status);
   const sourceCount = sources.length;
   const notebookTitle = workspace?.title || document.title || "Untitled notebook";
   const currentSummary = summaryByStyle[summaryStyle] || summary;
   const summaryBusy = busy.startsWith("summary-");
+  const summaryText = currentSummary?.summary || "";
 
   if (loading) {
     return (
@@ -490,7 +704,8 @@ export default function DocumentDetailPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#eef1fb] text-zinc-950">
+    <>
+      <div className="min-h-screen bg-[#eef1fb] text-zinc-950">
       <header className="flex h-[84px] items-center justify-between px-6">
         <div className="flex min-w-0 items-center gap-5">
           <Link to="/home" aria-label="Về trang sổ ghi chú">
@@ -500,6 +715,13 @@ export default function DocumentDetailPage() {
           <Badge variant="secondary">{statusLabel[document.status] || document.status}</Badge>
         </div>
         <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            className="hidden rounded-full xl:inline-flex"
+            onClick={() => setPanelSizes(DEFAULT_LAYOUT)}
+          >
+            Reset layout
+          </Button>
           <label className="hidden h-10 cursor-pointer items-center rounded-full bg-black px-6 text-sm font-medium text-white hover:bg-zinc-800 md:inline-flex">
             <Plus className="mr-2 h-5 w-5" />
             Thêm nguồn
@@ -516,8 +738,14 @@ export default function DocumentDetailPage() {
         </div>
       </header>
 
-      <main className="grid min-h-[calc(100vh-84px)] gap-5 px-5 pb-5 xl:h-[calc(100vh-84px)] xl:grid-cols-[360px_minmax(460px,1fr)_420px]">
-        <aside className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:overflow-hidden">
+      <main
+        ref={layoutRef}
+        className="grid min-h-[calc(100vh-84px)] gap-5 px-5 pb-5 xl:flex xl:h-[calc(100vh-84px)] xl:gap-3"
+      >
+        <aside
+          style={{ "--panel-left": `${panelSizes.left}%` }}
+          className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:shrink-0 xl:basis-[var(--panel-left)] xl:overflow-hidden"
+        >
           <div className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-5">
             <h2 className="text-lg font-medium">Nguồn tài liệu</h2>
             <PanelLeft className="h-5 w-5 text-zinc-600" />
@@ -557,6 +785,7 @@ export default function DocumentDetailPage() {
                     setDocument(nextDocument);
                     loadDocumentFeatures(nextDocument.id, summaryStyle);
                   }}
+                  onDelete={(targetDoc) => setDeleteDocumentTarget(targetDoc)}
                 />
               ))}
             </div>
@@ -591,7 +820,19 @@ export default function DocumentDetailPage() {
                 </button>
               </div>
               <div className="mt-3 space-y-3">
-                {activeRecommendations.length ? activeRecommendations.map((item) => (
+                {recommendationLoading ? (
+                  <div className="rounded-lg border border-dashed border-zinc-300 p-4 text-sm leading-6 text-zinc-500">
+                    Đang tải gợi ý tài liệu...
+                  </div>
+                ) : !isDocumentReady ? (
+                  <div className="rounded-lg border border-dashed border-zinc-300 p-4 text-sm leading-6 text-zinc-500">
+                    Hệ thống đang xử lý tài liệu. Gợi ý sẽ xuất hiện sau khi xử lý xong.
+                  </div>
+                ) : recommendationError ? (
+                  <div className="rounded-lg border border-dashed border-zinc-300 p-4 text-sm leading-6 text-zinc-500">
+                    {recommendationError}
+                  </div>
+                ) : activeRecommendations.length ? activeRecommendations.map((item) => (
                   <div key={item.id || item.title} className="rounded-lg bg-zinc-50 p-3">
                     <p className="text-sm font-medium text-zinc-900">{item.title}</p>
                     <p className="mt-1 text-xs leading-5 text-zinc-500">{item.reason || "Không có lý do gợi ý."}</p>
@@ -613,7 +854,7 @@ export default function DocumentDetailPage() {
                   <div className="rounded-lg border border-dashed border-zinc-300 p-4 text-sm leading-6 text-zinc-500">
                     {recommendations.length
                       ? `Chưa có gợi ý ${recommendationMode === "author" ? "theo tác giả" : "theo method"}.`
-                      : "Chưa có gợi ý từ backend. Hãy xử lý AI sau khi thêm nguồn."}
+                      : "Chưa tìm thấy tài liệu liên quan để gợi ý."}
                   </div>
                 )}
               </div>
@@ -621,7 +862,20 @@ export default function DocumentDetailPage() {
           </div>
         </aside>
 
-        <section className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:overflow-hidden">
+        <div
+          className="hidden xl:flex w-2 cursor-col-resize items-center justify-center rounded-full bg-transparent hover:bg-indigo-100"
+          onMouseDown={(event) => startResize("left", event)}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize source and chat panels"
+        >
+          <div className="h-16 w-[2px] rounded-full bg-zinc-300" />
+        </div>
+
+        <section
+          style={{ "--panel-center": `${panelSizes.center}%` }}
+          className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:shrink-0 xl:basis-[var(--panel-center)] xl:overflow-hidden"
+        >
           <div className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-5">
             <h2 className="text-lg font-medium">Cuộc trò chuyện</h2>
             <MoreVertical className="h-5 w-5 text-zinc-600" />
@@ -655,19 +909,7 @@ export default function DocumentDetailPage() {
                   </div>
                 ))}
                 {qaItems.map((item) => (
-                  <div key={`${item.question}-${item.answer}`} className="rounded-lg border border-zinc-200 p-5">
-                    <div className="flex items-start gap-2">
-                      <MessageSquare className="mt-0.5 h-4 w-4 text-zinc-700" />
-                      <p className="font-medium">{item.question}</p>
-                    </div>
-                    <p className="mt-3 text-sm leading-6 text-zinc-600">{item.answer}</p>
-                    {item.pending ? (
-                      <div className="mt-3 inline-flex items-center gap-2 text-xs text-zinc-500">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Đang xử lý
-                      </div>
-                    ) : null}
-                  </div>
+                  <AssistantMessage key={item.id || `${item.question}-${item.createdAt || ""}`} item={item} />
                 ))}
                 <div ref={qaEndRef} />
               </div>
@@ -675,8 +917,8 @@ export default function DocumentDetailPage() {
           </div>
 
           <div className="shrink-0 px-7 pb-5">
-            <div className="mx-auto flex max-w-5xl items-center gap-4 rounded-2xl border border-zinc-400 bg-white p-3 shadow-sm">
-              <input
+            <div className="mx-auto flex max-w-5xl items-end gap-4 rounded-2xl border border-zinc-400 bg-white p-3 shadow-sm">
+              <textarea
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={(event) => {
@@ -685,23 +927,34 @@ export default function DocumentDetailPage() {
                     handleAskQuestion();
                   }
                 }}
-                className="h-14 min-w-0 flex-1 px-4 text-base outline-none"
+                rows={2}
+                className="min-h-[56px] max-h-32 min-w-0 flex-1 resize-none px-4 py-3 text-base outline-none"
                 placeholder="Hỏi về tài liệu này..."
               />
               <span className="hidden text-sm text-zinc-600 sm:inline">
                 {document?.id ? "1 nguồn đang chọn" : "Chưa chọn nguồn"}
               </span>
-              <Button onClick={handleAskQuestion} disabled={busy === "qa" || !document.id || !isReadyStatus(document.status)} size="icon" className="h-12 w-12 rounded-full bg-zinc-200 text-zinc-700 hover:bg-zinc-300">
+              <Button onClick={handleAskQuestion} disabled={busy === "qa" || !document.id || !isReadyStatus(document.status) || !question.trim()} size="icon" className="h-12 w-12 rounded-full bg-zinc-200 text-zinc-700 hover:bg-zinc-300 disabled:cursor-not-allowed disabled:opacity-60">
                 {busy === "qa" ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
               </Button>
             </div>
-            <p className="mt-3 text-center text-xs text-zinc-500">
-              Câu hỏi được gửi tới {`POST /api/v1/cms/documents/${document?.id || "<id>"}/qa/request`}; backend gọi trực tiếp AI module và lưu vào lịch sử Q&A.
-            </p>
           </div>
         </section>
 
-        <aside className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:overflow-hidden">
+        <div
+          className="hidden xl:flex w-2 cursor-col-resize items-center justify-center rounded-full bg-transparent hover:bg-indigo-100"
+          onMouseDown={(event) => startResize("right", event)}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat and summary panels"
+        >
+          <div className="h-16 w-[2px] rounded-full bg-zinc-300" />
+        </div>
+
+        <aside
+          style={{ "--panel-right": `${panelSizes.right}%` }}
+          className="flex flex-col rounded-lg bg-white xl:min-h-0 xl:shrink-0 xl:basis-[var(--panel-right)] xl:overflow-hidden"
+        >
           <div className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-5">
             <h2 className="text-lg font-medium">Tóm tắt</h2>
             <PanelRight className="h-5 w-5 text-zinc-600" />
@@ -709,11 +962,7 @@ export default function DocumentDetailPage() {
 
           <div className="flex-1 p-5 xl:min-h-0 xl:overflow-y-auto">
             <section className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5">
-              <div className="flex items-center justify-between gap-3 text-zinc-900">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-5 w-5" />
-                  <p className="text-sm font-medium">Tóm tắt</p>
-                </div>
+              <div className="mb-3 flex items-center gap-2 text-zinc-900">
                 <Button
                   onClick={() => handleRequestSummary("medium", "academic")}
                   disabled={!document.id || summaryBusy}
@@ -736,13 +985,23 @@ export default function DocumentDetailPage() {
                   {busy === "summary-executive" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Executive"}
                 </Button>
               </div>
-              <p className="mt-3 text-sm leading-7 text-zinc-600">
-                {currentSummary?.summary_medium || currentSummary?.summary_short || currentSummary?.summary_long || "Chưa có tóm tắt trong backend. Hãy bấm Tóm tắt để tạo nội dung đầu ra."}
-              </p>
+              <SummaryRenderer
+                text={summaryText}
+                style={summaryStyle}
+                loading={summaryBusy}
+                error={summaryError}
+              />
             </section>
           </div>
         </aside>
       </main>
-    </div>
+      </div>
+      <DeleteDocumentDialog
+        open={Boolean(deleteDocumentTarget)}
+        loading={deletingDocument}
+        onClose={() => !deletingDocument && setDeleteDocumentTarget(null)}
+        onConfirm={handleDeleteSource}
+      />
+    </>
   );
 }
