@@ -50,6 +50,15 @@ from ingestion.pipeline import run_pipeline, run_pipeline_batch, summarize_batch
 from ingestion.schema.document_schema import UnifiedDocument
 
 logger = logging.getLogger(__name__)
+LOCKED_OLLAMA_BASE_URL = "http://n2.ckey.vn:2679"
+LOCKED_OLLAMA_CHAT_ENDPOINT = "/v1/chat/completions"
+LOCKED_OLLAMA_MODEL = "qwen2.5:7b-instruct-fp16"
+LOCKED_OLLAMA_TIMEOUT = "120"
+LOCKED_OLLAMA_TEMPERATURE = "0.1"
+LOCKED_LLM_BACKEND = "vllm"
+LOCKED_VLLM_BASE_URL = "http://n2.ckey.vn:2679"
+LOCKED_VLLM_MODEL_NAME = "qwen2.5:7b-instruct-fp16"
+LOCKED_VLLM_TIMEOUT_SECONDS = "180"
 
 
 def _load_env_file(path: Path) -> None:
@@ -73,6 +82,22 @@ def _load_env_file(path: Path) -> None:
                     os.environ[key] = value
     except Exception as e:
         logger.debug("Failed to load env file '%s': %s", path, e)
+
+
+def _force_locked_gpu_env() -> None:
+    os.environ["OLLAMA_BASE_URL"] = LOCKED_OLLAMA_BASE_URL
+    os.environ["OLLAMA_CHAT_ENDPOINT"] = LOCKED_OLLAMA_CHAT_ENDPOINT
+    os.environ["OLLAMA_MODEL"] = LOCKED_OLLAMA_MODEL
+    os.environ["OLLAMA_TIMEOUT"] = LOCKED_OLLAMA_TIMEOUT
+    os.environ["OLLAMA_TEMPERATURE"] = LOCKED_OLLAMA_TEMPERATURE
+    os.environ["INGESTION_LOCKED_OLLAMA_BASE_URL"] = LOCKED_OLLAMA_BASE_URL
+    os.environ["INGESTION_LOCKED_OLLAMA_CHAT_ENDPOINT"] = LOCKED_OLLAMA_CHAT_ENDPOINT
+    os.environ["INGESTION_LOCKED_OLLAMA_MODEL"] = LOCKED_OLLAMA_MODEL
+
+    os.environ["LLM_BACKEND"] = LOCKED_LLM_BACKEND
+    os.environ["VLLM_BASE_URL"] = LOCKED_VLLM_BASE_URL
+    os.environ["VLLM_MODEL_NAME"] = LOCKED_VLLM_MODEL_NAME
+    os.environ["VLLM_TIMEOUT_SECONDS"] = LOCKED_VLLM_TIMEOUT_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +238,7 @@ Examples:
     parser.add_argument("--no-lm", dest="use_lm", action="store_false",
                         help="Tắt LM metadata extraction")
     parser.add_argument("--lm-model", default="qwen2.5:7b", metavar="MODEL",
-                        help="Ollama model name (default: qwen2.5:7b)")
+                        help="Deprecated: ignored because ingestion is locked to GPU model qwen2.5:7b-instruct-fp16")
     parser.add_argument("--resume", action="store_true",
                         help="Skip bài đã có output JSON")
     parser.add_argument("--dry-run-enrich", action="store_true",
@@ -229,8 +254,7 @@ Examples:
 
     args = parser.parse_args()
 
-    if args.lm_model:
-        os.environ["OLLAMA_MODEL"] = args.lm_model
+    _force_locked_gpu_env()
 
     # Setup logging
     log_level = logging.DEBUG if args.verbose else logging.INFO

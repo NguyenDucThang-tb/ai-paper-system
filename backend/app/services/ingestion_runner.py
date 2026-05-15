@@ -20,6 +20,16 @@ from app.models.document_graph import DocumentGraph
 
 logger = logging.getLogger(__name__)
 
+LOCKED_OLLAMA_BASE_URL = "http://n2.ckey.vn:2679"
+LOCKED_OLLAMA_CHAT_ENDPOINT = "/v1/chat/completions"
+LOCKED_OLLAMA_MODEL = "qwen2.5:7b-instruct-fp16"
+LOCKED_OLLAMA_TIMEOUT = "120"
+LOCKED_OLLAMA_TEMPERATURE = "0.1"
+LOCKED_LLM_BACKEND = "vllm"
+LOCKED_VLLM_BASE_URL = "http://n2.ckey.vn:2679"
+LOCKED_VLLM_MODEL_NAME = "qwen2.5:7b-instruct-fp16"
+LOCKED_VLLM_TIMEOUT_SECONDS = "180"
+
 
 def _strip_nul(text: str | None) -> str:
     if not text:
@@ -35,6 +45,63 @@ def _sanitize_payload_strings(obj):
     if isinstance(obj, dict):
         return {key: _sanitize_payload_strings(value) for key, value in obj.items()}
     return obj
+
+
+def _force_locked_gpu_env() -> None:
+    """
+    Force ingestion + AI module to use one GPU endpoint/model only.
+    """
+    os.environ["OLLAMA_BASE_URL"] = LOCKED_OLLAMA_BASE_URL
+    os.environ["OLLAMA_CHAT_ENDPOINT"] = LOCKED_OLLAMA_CHAT_ENDPOINT
+    os.environ["OLLAMA_MODEL"] = LOCKED_OLLAMA_MODEL
+    os.environ["OLLAMA_TIMEOUT"] = LOCKED_OLLAMA_TIMEOUT
+    os.environ["OLLAMA_TEMPERATURE"] = LOCKED_OLLAMA_TEMPERATURE
+    os.environ["INGESTION_LOCKED_OLLAMA_BASE_URL"] = LOCKED_OLLAMA_BASE_URL
+    os.environ["INGESTION_LOCKED_OLLAMA_CHAT_ENDPOINT"] = LOCKED_OLLAMA_CHAT_ENDPOINT
+    os.environ["INGESTION_LOCKED_OLLAMA_MODEL"] = LOCKED_OLLAMA_MODEL
+
+    os.environ["LLM_BACKEND"] = LOCKED_LLM_BACKEND
+    os.environ["VLLM_BASE_URL"] = LOCKED_VLLM_BASE_URL
+    os.environ["VLLM_MODEL_NAME"] = LOCKED_VLLM_MODEL_NAME
+    os.environ["VLLM_TIMEOUT_SECONDS"] = LOCKED_VLLM_TIMEOUT_SECONDS
+
+
+def _extract_topics_methods(payload: dict) -> tuple[list[str], list[str]]:
+    topics: list[str] = []
+    methods: list[str] = []
+
+    for kw in payload.get("keywords") or []:
+        s = _strip_nul(str(kw)).strip()
+        if s:
+            topics.append(s)
+
+    for sec in payload.get("sections") or []:
+        if not isinstance(sec, dict):
+            continue
+        sec_name = _strip_nul(str(sec.get("name") or "")).strip()
+        sec_type = _strip_nul(str(sec.get("section_type") or "")).strip().lower()
+        if sec_name and sec_type in {"method", "methods"}:
+            methods.append(sec_name)
+
+    if not methods:
+        text = _strip_nul(payload.get("full_text") or "").lower()
+        if text:
+            for marker in ("phương pháp", "methods", "methodology", "materials and methods"):
+                if marker in text:
+                    methods.append(marker)
+
+    def _dedup(values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            key = item.lower().strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(item.strip())
+        return out
+
+    return _dedup(topics)[:30], _dedup(methods)[:30]
 
 def _detect_project_root() -> Path:
     current = Path(__file__).resolve()
@@ -190,12 +257,15 @@ def _upsert_metadata(db: Session, document_id: int, doc_obj) -> None:
         db.add(meta)
 
     payload = _serialize_doc_for_json(doc_obj)
+    topics, methods = _extract_topics_methods(payload)
     meta.title = _strip_nul(payload.get("title"))
     meta.abstract = _strip_nul(payload.get("abstract"))
     meta.publication_year = payload.get("year")
     meta.language = _strip_nul(payload.get("language"))
     meta.authors = [_strip_nul(x) for x in (payload.get("authors") or [])]
     meta.keywords = [_strip_nul(x) for x in (payload.get("keywords") or [])]
+    meta.topics = topics
+    meta.methods = methods
     meta.doi = _strip_nul(payload.get("doi"))
     meta.updated_at = datetime.utcnow()
 
@@ -475,6 +545,7 @@ def _auto_build_graph(document: Document, db: Session, doc_payload: dict) -> boo
 def run_ingestion_for_document(document_id: int, use_lm: bool = True) -> None:
     db = SessionLocal()
     try:
+        _force_locked_gpu_env()
         document = (
             db.query(Document)
             .filter(Document.id == document_id, Document.is_deleted == False)

@@ -24,12 +24,13 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "").rstrip("/")
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_CHAT_ENDPOINT = os.getenv("OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions")
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}{OLLAMA_CHAT_ENDPOINT}"
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-fp16")
 TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
 TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))  # seconds
 MAX_INPUT_CHARS = 3000
-LOCKED_GPU_BASE_URL = os.getenv("INGESTION_LOCKED_OLLAMA_BASE_URL", "http://n2.ckey.vn:3397").rstrip("/")
+LOCKED_GPU_BASE_URL = os.getenv("INGESTION_LOCKED_OLLAMA_BASE_URL", "http://n2.ckey.vn:2679").rstrip("/")
 LOCKED_CHAT_ENDPOINT = os.getenv("INGESTION_LOCKED_OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions")
+LOCKED_MODEL = os.getenv("INGESTION_LOCKED_OLLAMA_MODEL", "qwen2.5:7b-instruct-fp16").strip()
 
 METADATA_PROMPT_TEMPLATE = """Bạn là trợ lý trích xuất metadata từ bài báo khoa học.
 Trích xuất JSON với các trường sau từ đoạn text bài báo:
@@ -94,9 +95,26 @@ def _is_locked_gpu_endpoint() -> bool:
     return True
 
 
+def _is_locked_model(model: str) -> bool:
+    current = (model or "").strip()
+    if not current:
+        logger.warning("OLLAMA_MODEL is empty. Skipping LM metadata extraction.")
+        return False
+    if current != LOCKED_MODEL:
+        logger.warning(
+            "Blocked LM metadata extraction: OLLAMA_MODEL=%s is not allowed. Required=%s",
+            current,
+            LOCKED_MODEL,
+        )
+        return False
+    return True
+
+
 def is_ollama_available(model: str = DEFAULT_MODEL) -> bool:
     """Kiểm tra endpoint LLM và model có sẵn không."""
     if not _is_locked_gpu_endpoint():
+        return False
+    if not _is_locked_model(model):
         return False
     try:
         import requests

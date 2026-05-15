@@ -266,7 +266,7 @@ def run_pipeline_batch(
     aggressive_clean:       bool = False,
     multimodal_output_root: str  = "data/multimodal/figures",
     dry_run_enrich:         bool = False,
-    use_lm:                 bool = False,
+    use_lm:                 bool = True,
 ) -> list[PipelineResult]:
     """
     Chạy pipeline cho một batch files.
