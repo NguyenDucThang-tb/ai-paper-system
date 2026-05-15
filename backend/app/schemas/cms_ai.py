@@ -107,6 +107,3 @@ class RecommendationPayload(BaseModel):
 class RecommendationResponse(BaseModel):
     document_id: int
     items: list[RecommendationItem]
-    reason: str | None = None
-    message: str | None = None
-    source: str | None = None

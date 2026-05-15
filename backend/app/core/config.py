@@ -47,14 +47,6 @@ class Settings:
     )
 
     DATABASE_URL: str | None = os.getenv("DATABASE_URL")
-    NEO4J_URI: str | None = os.getenv("NEO4J_URI")
-    NEO4J_USERNAME: str | None = os.getenv("NEO4J_USERNAME", os.getenv("NEO4J_USER"))
-    NEO4J_PASSWORD: str | None = os.getenv("NEO4J_PASSWORD")
-    NEO4J_DATABASE: str = os.getenv("NEO4J_DATABASE", "neo4j")
-    NEO4J_REC_URI: str | None = os.getenv("NEO4J_REC_URI")
-    NEO4J_REC_USERNAME: str | None = os.getenv("NEO4J_REC_USERNAME", os.getenv("NEO4J_REC_USER"))
-    NEO4J_REC_PASSWORD: str | None = os.getenv("NEO4J_REC_PASSWORD")
-    NEO4J_REC_DATABASE: str = os.getenv("NEO4J_REC_DATABASE", "neo4j")
     CORS_ALLOWED_ORIGINS: list[str] = _parse_csv_env(
         os.getenv(
             "CORS_ALLOWED_ORIGINS",

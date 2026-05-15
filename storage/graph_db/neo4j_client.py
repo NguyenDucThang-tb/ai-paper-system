@@ -151,13 +151,6 @@ class Neo4jClient:
         self._config = config
         self._driver = None
 
-    @property
-    def config(self) -> Neo4jConfig:
-        return self._config
-
-    def is_configured(self) -> bool:
-        return bool(self._config.uri and self._config.username and self._config.password)
-
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------

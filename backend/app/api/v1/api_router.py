@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 # ===== Core endpoints =====
-from app.api.v1.endpoints import auth, users, admin, debug
+from app.api.v1.endpoints import auth, users, admin
 
 # ===== CMS (user-facing features) =====
 from app.api.v1.cms import ai_features, analytics, dashboard, documents, workspaces
@@ -31,12 +31,6 @@ api_router.include_router(
     admin.router,
     prefix="/admin",
     tags=["admin"]
-)
-
-api_router.include_router(
-    debug.router,
-    prefix="/debug",
-    tags=["debug"]
 )
 
 # =========================
