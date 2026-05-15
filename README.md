@@ -25,16 +25,22 @@ DATABASE_URL=postgresql://...
 SECRET_KEY=...
 INTERNAL_API_TOKEN=...
 
-NEO4J_URI=neo4j+s://<aura-user-doc>.databases.neo4j.io
-NEO4J_USER=<username>
-NEO4J_PASSWORD=<password>
-NEO4J_DATABASE=<database>
-NEO4J_USER_DOC_DB=<database>
+NEO4J_URI=neo4j+s://6d37f1fa.databases.neo4j.io
+NEO4J_USER=neo4j
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=I3Pzsg1gvUw2BCFsp3A6CjuhjjY9XIun1Fp6dsYJo3s
+NEO4J_DATABASE=neo4j
+NEO4J_USER_DOC_DB=neo4j
+AURA_INSTANCEID=6d37f1fa
+AURA_INSTANCENAME=My instance
 
-NEO4J_REC_URI=neo4j+s://<aura-rec>.databases.neo4j.io
-NEO4J_REC_USER=<username>
-NEO4J_REC_PASSWORD=<password>
-NEO4J_REC_DATABASE=<database>
+NEO4J_REC_URI=neo4j+s://65e82d44.databases.neo4j.io
+NEO4J_REC_USER=65e82d44
+NEO4J_REC_USERNAME=65e82d44
+NEO4J_REC_PASSWORD=76VhdpIq2of0DEJvrRlbtiW4N-FdMaq1rv6RB4dvvbM
+NEO4J_REC_DATABASE=65e82d44
+NEO4J_REC_AURA_INSTANCEID=65e82d44
+NEO4J_REC_AURA_INSTANCENAME=Instance01
 ```
 
 ## Chạy local (không Docker)
