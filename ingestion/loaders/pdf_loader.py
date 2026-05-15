@@ -57,6 +57,7 @@ OCR_REMOTE_ENDPOINT = os.getenv("OCR_REMOTE_ENDPOINT", "/v1/chat/completions").s
 OCR_REMOTE_MODEL_NAME = os.getenv("OCR_REMOTE_MODEL_NAME", "").strip()
 OCR_TIMEOUT_SECONDS = int(os.getenv("OCR_TIMEOUT_SECONDS", "120"))
 OCR_REMOTE_API_KEY = os.getenv("OCR_REMOTE_API_KEY", "").strip()
+OCR_FORCE_ALL_PAGES = os.getenv("OCR_FORCE_ALL_PAGES", "false").strip().lower() == "true"
 COL_SPLIT_RATIO = 0.50     # x-split ratio cho 2-column layout
 MIN_IMG_WIDTH   = 80       # pixel width tối thiểu để lưu figure
 MIN_IMG_HEIGHT  = 80       # pixel height tối thiểu
@@ -196,15 +197,24 @@ def load_pdf(
     # --- Step 1: Rasterize all pages → PIL Images ---
     page_images, fitz_doc = _rasterize_pages(path, dpi=ocr_dpi)
 
-    # --- Step 2: Ưu tiên text layer, chỉ OCR trang thiếu text ---
-    prefilled_texts, ocr_indices = _prefill_texts_from_pymupdf(fitz_doc)
-    engine = _select_ocr_engine(ocr_engine, ocr_backend)
-    if ocr_indices:
-        ocr_images = [page_images[i] for i in ocr_indices]
-        ocr_texts = _ocr_pages(ocr_images, engine, ocr_backend)
-        for idx, text in zip(ocr_indices, ocr_texts):
-            prefilled_texts[idx] = text
-    page_texts = prefilled_texts
+    # --- Step 2: OCR ---
+    # Default: prefill text-layer để tăng tốc, OCR khi cần.
+    # Force mode: OCR toàn bộ trang (đảm bảo đi qua OCR pipeline).
+    if OCR_FORCE_ALL_PAGES:
+        engine = _select_ocr_engine(ocr_engine, ocr_backend)
+        page_texts = _ocr_pages(page_images, engine, ocr_backend)
+        logger.info("OCR_FORCE_ALL_PAGES=true → OCR all %d pages with engine=%s", len(page_images), engine)
+    else:
+        prefilled_texts, ocr_indices = _prefill_texts_from_pymupdf(fitz_doc)
+        if ocr_indices:
+            engine = _select_ocr_engine(ocr_engine, ocr_backend)
+            ocr_images = [page_images[i] for i in ocr_indices]
+            ocr_texts = _ocr_pages(ocr_images, engine, ocr_backend)
+            for idx, text in zip(ocr_indices, ocr_texts):
+                prefilled_texts[idx] = text
+        else:
+            engine = "pymupdf"
+        page_texts = prefilled_texts
 
     # --- Step 3: PyMuPDF 2-column layout extraction ---
     # Với trang có text layer, extract text giữ nguyên cấu trúc cột rồi merge với OCR
@@ -317,16 +327,18 @@ def _check_paddle() -> bool:
 def _ocr_pages(images: list[Image.Image], engine: str, backend: str) -> list[str]:
     """OCR tất cả trang, trả về list[str] text theo thứ tự trang."""
     if backend == "remote":
-        return _ocr_with_remote(images)
+        remote = _ocr_with_remote(images)
+        # fallback local nếu remote trả rỗng toàn bộ
+        if any((t or "").strip() for t in remote):
+            return remote
+        logger.warning("Remote OCR returned empty for all pages; falling back to local OCR engine.")
     if engine == "paddle":
         return _ocr_with_paddle(images)
     return _ocr_with_tesseract(images)
 
 
 def _ocr_with_remote(images: list[Image.Image]) -> list[str]:
-    """
-    OCR qua remote GPU server, endpoint OpenAI-compatible chat completions.
-    """
+    """OCR qua remote OpenAI-compatible vision endpoint."""
     if not OCR_BASE_URL:
         raise RuntimeError("OCR_BASE_URL is required when OCR_BACKEND=remote.")
     if not OCR_REMOTE_MODEL_NAME:
@@ -351,26 +363,19 @@ def _ocr_with_remote(images: list[Image.Image]) -> list[str]:
             payload = {
                 "model": OCR_REMOTE_MODEL_NAME,
                 "temperature": 0,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Extract all visible text from this page. Return plain text only."},
-                            {"type": "image_url", "image_url": {"url": data_url}},
-                        ],
-                    }
-                ],
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract all visible text from this page. Return plain text only."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }],
             }
             resp = requests.post(endpoint, headers=headers, json=payload, timeout=OCR_TIMEOUT_SECONDS)
             resp.raise_for_status()
             data = resp.json()
-            text = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
-            if not isinstance(text, str):
-                text = str(text or "")
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            text = text if isinstance(text, str) else str(text or "")
             results.append(text.strip())
             logger.info("  -> Page %d/%d OCR done: %d chars (remote)", i + 1, len(images), len(text))
         except Exception as e:
@@ -626,13 +631,10 @@ def _merge_with_pymupdf(fitz_doc: fitz.Document, ocr_texts: list[str]) -> list[s
 
 
 def _extract_text_blocks_for_page(page: fitz.Page) -> str:
-    """
-    Trích text theo block từ một trang, bỏ header/footer noise.
-    """
+    """Trích text block hợp lệ (lọc header/footer)."""
     height = page.rect.height
     header_margin = height * 0.06
     footer_margin = height * 0.94
-
     blocks = page.get_text("blocks")
     valid_blocks: list[str] = []
     for b in blocks:
@@ -640,16 +642,16 @@ def _extract_text_blocks_for_page(page: fitz.Page) -> str:
             continue
         if b[1] < header_margin or b[3] > footer_margin:
             continue
-        text = (b[4] or "").strip()
-        if text:
-            valid_blocks.append(text)
+        txt = (b[4] or "").strip()
+        if txt:
+            valid_blocks.append(txt)
     return "\n\n".join(valid_blocks).strip()
 
 
 def _prefill_texts_from_pymupdf(fitz_doc: fitz.Document) -> tuple[list[str], list[int]]:
     """
-    Prefill text từ text layer để tránh OCR không cần thiết.
-    Chỉ OCR các trang có text layer quá ngắn/rỗng.
+    Dùng text-layer trước để tăng tốc.
+    Chỉ OCR các trang có text rỗng/quá ít.
     """
     texts: list[str] = []
     ocr_indices: list[int] = []
@@ -660,7 +662,6 @@ def _prefill_texts_from_pymupdf(fitz_doc: fitz.Document) -> tuple[list[str], lis
         else:
             texts.append("")
             ocr_indices.append(i)
-
     logger.info(
         "Prefill text-layer pages: %d/%d pages, OCR needed: %d pages",
         len(texts) - len(ocr_indices),
