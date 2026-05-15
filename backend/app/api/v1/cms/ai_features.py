@@ -92,34 +92,38 @@ def get_latest_summary(db: Session, document_id: int, summary_style: str | None 
 
 
 def _load_document_artifact_json(db: Session, document_id: int) -> dict | None:
-    artifact = (
+    artifacts = (
         db.query(DocumentArtifact)
         .filter(
             DocumentArtifact.document_id == document_id,
             DocumentArtifact.artifact_type == "unified_json",
         )
         .order_by(DocumentArtifact.created_at.desc())
-        .first()
+        .all()
     )
-    if artifact is None:
+    if not artifacts:
         return None
-    raw_uri = (artifact.uri or "").strip()
-    if not raw_uri:
-        return None
-    path = Path(raw_uri)
-    if not path.is_absolute():
-        # Prefer artifact paths relative to repository root.
-        candidate_paths = [
-            (PROJECT_ROOT / raw_uri).resolve(),
-            (PROJECT_ROOT / "backend" / raw_uri).resolve(),
-        ]
-        path = next((p for p in candidate_paths if p.exists()), candidate_paths[0])
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    for artifact in artifacts:
+        raw_uri = (artifact.uri or "").strip()
+        if not raw_uri:
+            continue
+        path = Path(raw_uri)
+        if not path.is_absolute():
+            # Prefer artifact paths relative to repository root.
+            candidate_paths = [
+                (PROJECT_ROOT / raw_uri).resolve(),
+                (PROJECT_ROOT / "backend" / raw_uri).resolve(),
+            ]
+            path = next((p for p in candidate_paths if p.exists()), candidate_paths[0])
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            continue
+    return None
 
 
 def _fallback_summary_from_doc_json(doc_json: dict) -> str:
@@ -1105,16 +1109,35 @@ def _request_summary_by_style(
 
     doc_json = _load_document_artifact_json(db, document.id)
     if not doc_json:
-        job.status = "failed"
-        job.error_message = "No ingestion artifact found. Upload/processing must complete first."
-        job.completed_at = datetime.utcnow()
+        current_status = str(document.status or "").strip().lower()
+        processing_statuses = {
+            "uploaded", "processing", "extracting", "chunking", "embedding",
+            "graphing", "building_graph",
+        }
+        if current_status in processing_statuses:
+            job.status = "running"
+            job.error_message = None
+            job.result = {
+                "status": "running",
+                "message": "Document is still being processed. Retry summary shortly.",
+                "document_status": current_status,
+                "summary_style": normalize_summary_style(summary_style),
+            }
+        else:
+            job.status = "failed"
+            job.error_message = "No ingestion artifact found. Upload/processing must complete first."
+            job.completed_at = datetime.utcnow()
         db.commit()
         return {
             "document_id": document.id,
             "question": f"summary:{level}:{summary_style}",
-            "status": "failed",
+            "status": "running" if current_status in processing_statuses else "failed",
             "job_id": job.id,
-            "message": "No artifact found for summary generation",
+            "message": (
+                "Tài liệu đang được xử lý ingestion. Vui lòng đợi và thử lại sau."
+                if current_status in processing_statuses
+                else "No artifact found for summary generation"
+            ),
             "summary_style": normalize_summary_style(summary_style),
             "summary_text": None,
         }

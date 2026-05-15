@@ -253,6 +253,10 @@ export default function DocumentDetailPage() {
     return ["processed", "indexed"].includes(String(status || "").toLowerCase());
   }
 
+  function isSummaryReadyStatus(status) {
+    return ["parsed", "processed", "indexed"].includes(String(status || "").toLowerCase());
+  }
+
   function shouldPollStatus(status) {
     return ["uploaded", "processing", "parsed"].includes(String(status || "").toLowerCase());
   }
@@ -483,6 +487,10 @@ export default function DocumentDetailPage() {
 
   async function handleRequestSummary(level, summaryStyle = "academic") {
     if (!document.id) return;
+    if (!isSummaryReadyStatus(document.status)) {
+      setMessage("Tài liệu đang ingestion. Vui lòng đợi hoàn tất rồi tạo tóm tắt.");
+      return;
+    }
     const style = String(summaryStyle || "academic").toLowerCase();
     setSummaryStyle(style);
     setBusy(`summary-${style}`);
@@ -965,21 +973,21 @@ export default function DocumentDetailPage() {
               <div className="mb-3 flex items-center gap-2 text-zinc-900">
                 <Button
                   onClick={() => handleRequestSummary("medium", "academic")}
-                  disabled={!document.id || summaryBusy}
+                  disabled={!document.id || summaryBusy || !isSummaryReadyStatus(document.status)}
                   className="rounded-full bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-800"
                 >
                   {busy === "summary-academic" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Academic"}
                 </Button>
                 <Button
                   onClick={() => handleRequestSummary("medium", "semantic")}
-                  disabled={!document.id || summaryBusy}
+                  disabled={!document.id || summaryBusy || !isSummaryReadyStatus(document.status)}
                   className="rounded-full bg-zinc-700 px-4 text-sm font-medium text-white hover:bg-zinc-600"
                 >
                   {busy === "summary-semantic" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Semantic"}
                 </Button>
                 <Button
                   onClick={() => handleRequestSummary("medium", "executive")}
-                  disabled={!document.id || summaryBusy}
+                  disabled={!document.id || summaryBusy || !isSummaryReadyStatus(document.status)}
                   className="rounded-full bg-zinc-600 px-4 text-sm font-medium text-white hover:bg-zinc-500"
                 >
                   {busy === "summary-executive" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Executive"}

@@ -196,9 +196,15 @@ def load_pdf(
     # --- Step 1: Rasterize all pages → PIL Images ---
     page_images, fitz_doc = _rasterize_pages(path, dpi=ocr_dpi)
 
-    # --- Step 2: OCR mỗi trang ---
+    # --- Step 2: Ưu tiên text layer, chỉ OCR trang thiếu text ---
+    prefilled_texts, ocr_indices = _prefill_texts_from_pymupdf(fitz_doc)
     engine = _select_ocr_engine(ocr_engine, ocr_backend)
-    page_texts = _ocr_pages(page_images, engine, ocr_backend)
+    if ocr_indices:
+        ocr_images = [page_images[i] for i in ocr_indices]
+        ocr_texts = _ocr_pages(ocr_images, engine, ocr_backend)
+        for idx, text in zip(ocr_indices, ocr_texts):
+            prefilled_texts[idx] = text
+    page_texts = prefilled_texts
 
     # --- Step 3: PyMuPDF 2-column layout extraction ---
     # Với trang có text layer, extract text giữ nguyên cấu trúc cột rồi merge với OCR
@@ -617,6 +623,51 @@ def _merge_with_pymupdf(fitz_doc: fitz.Document, ocr_texts: list[str]) -> list[s
         logger.warning("PyMuPDF merge failed: %s — using OCR only", e)
 
     return merged
+
+
+def _extract_text_blocks_for_page(page: fitz.Page) -> str:
+    """
+    Trích text theo block từ một trang, bỏ header/footer noise.
+    """
+    height = page.rect.height
+    header_margin = height * 0.06
+    footer_margin = height * 0.94
+
+    blocks = page.get_text("blocks")
+    valid_blocks: list[str] = []
+    for b in blocks:
+        if b[6] != 0:
+            continue
+        if b[1] < header_margin or b[3] > footer_margin:
+            continue
+        text = (b[4] or "").strip()
+        if text:
+            valid_blocks.append(text)
+    return "\n\n".join(valid_blocks).strip()
+
+
+def _prefill_texts_from_pymupdf(fitz_doc: fitz.Document) -> tuple[list[str], list[int]]:
+    """
+    Prefill text từ text layer để tránh OCR không cần thiết.
+    Chỉ OCR các trang có text layer quá ngắn/rỗng.
+    """
+    texts: list[str] = []
+    ocr_indices: list[int] = []
+    for i, page in enumerate(fitz_doc):
+        text = _extract_text_blocks_for_page(page)
+        if len(text) >= 120:
+            texts.append(text)
+        else:
+            texts.append("")
+            ocr_indices.append(i)
+
+    logger.info(
+        "Prefill text-layer pages: %d/%d pages, OCR needed: %d pages",
+        len(texts) - len(ocr_indices),
+        len(texts),
+        len(ocr_indices),
+    )
+    return texts, ocr_indices
 
 
 # ---------------------------------------------------------------------------
