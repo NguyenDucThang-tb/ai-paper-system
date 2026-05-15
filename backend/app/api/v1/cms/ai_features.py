@@ -982,62 +982,6 @@ def _compute_metadata_recommendations(
     return items[:limit]
 
 
-def _compute_neo4j_popular_author_fallback(limit: int = 10) -> list[RecommendationItem]:
-    from storage.graph_db.neo4j_client import Neo4jClient, Neo4jConfig
-
-    cfg = Neo4jConfig(
-        uri=os.getenv("NEO4J_REC_URI", "").strip(),
-        username=os.getenv("NEO4J_REC_USER", os.getenv("NEO4J_REC_USERNAME", "")).strip(),
-        password=os.getenv("NEO4J_REC_PASSWORD", "").strip(),
-        database=os.getenv("NEO4J_REC_DATABASE", "neo4j").strip(),
-    )
-    if not cfg.uri or not cfg.username or not cfg.password:
-        return []
-
-    client = Neo4jClient(cfg)
-    try:
-        client.connect()
-        rows = client.execute_read(
-            """
-            MATCH (a:Author)-[:WROTE]->(p:Paper)
-            OPTIONAL MATCH (p)<-[:CITES]-(:Paper)
-            WITH a, p, count(*) AS cite_in
-            RETURN p.id AS id, p.title AS title, p.doi AS doi, a.name AS author, cite_in
-            ORDER BY cite_in DESC
-            LIMIT $k
-            """,
-            {"k": max(limit, 10)},
-        )
-        items: list[RecommendationItem] = []
-        for row in rows:
-            title = str(row.get("title") or row.get("id") or "Unknown paper")
-            doi = str(row.get("doi") or "").strip()
-            author = str(row.get("author") or "").strip()
-            items.append(
-                RecommendationItem(
-                    id=None,
-                    recommended_document_id=None,
-                    recommendation_type="author",
-                    title=title,
-                    reason=(f"Cùng tác giả '{author}'" if author else "Gợi ý theo tác giả"),
-                    score=float(row.get("cite_in") or 0.5),
-                    source="neo4j_author_graph",
-                    external_url=(f"https://doi.org/{doi}" if doi else None),
-                )
-            )
-            if len(items) >= limit:
-                break
-        return items
-    except Exception:
-        logger.exception("neo4j popular author fallback failed")
-        return []
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
-
-
 def create_ai_job(
     db: Session,
     document: Document,
@@ -1806,9 +1750,6 @@ def get_recommendations(
         for it in items:
             if not getattr(it, "recommendation_type", None):
                 it.recommendation_type = "author"
-
-    if not items:
-        items = _compute_neo4j_popular_author_fallback(limit=10)
 
     seen: dict[tuple[str, str], RecommendationItem] = {}
     for it in items:
