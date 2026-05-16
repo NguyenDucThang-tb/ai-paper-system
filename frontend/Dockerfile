@@ -6,7 +6,7 @@ COPY package.json package-lock.json /app/
 RUN npm ci
 
 COPY . /app
-ARG VITE_API_BASE_URL=http://localhost:8000/api/v1
+ARG VITE_API_BASE_URL=https://triumphant-charisma-production-f2a9.up.railway.app/api/v1
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 RUN npm run build
 

@@ -233,7 +233,7 @@ def get_google_oauth_client():
 
 
 def get_google_redirect_uri() -> str:
-    return settings.GOOGLE_OAUTH_REDIRECT_URI or "http://localhost:8000/api/v1/auth/google/callback"
+    return settings.GOOGLE_OAUTH_REDIRECT_URI or "https://triumphant-charisma-production-f2a9.up.railway.app/api/v1/auth/google/callback"
 
 
 def build_frontend_callback_url(fragment_params: dict[str, str]) -> str:
@@ -242,8 +242,7 @@ def build_frontend_callback_url(fragment_params: dict[str, str]) -> str:
 
 def resolve_frontend_origin(frontend_origin: str | None) -> str:
     allowed_prefixes = (
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
+        "https://ai-paper-system.vercel.app",
     )
     candidate = (frontend_origin or "").strip()
     if any(candidate.startswith(prefix) for prefix in allowed_prefixes):
