@@ -36,7 +36,7 @@ class InferenceConfig:
     max_input_chars_higen: int = int(os.getenv("MAX_INPUT_CHARS_HIGEN", "2600"))
 
     top_k: int = int(os.getenv("TOP_K", "5"))
-    max_new_tokens_summary: int = int(os.getenv("MAX_NEW_TOKENS_SUMMARY", "700"))
+    max_new_tokens_summary: int = int(os.getenv("MAX_NEW_TOKENS_SUMMARY", "2000"))
     max_new_tokens_qa: int = int(os.getenv("MAX_NEW_TOKENS_QA", "500"))
     max_new_tokens_events: int = int(os.getenv("MAX_NEW_TOKENS_EVENTS", "700"))
 
