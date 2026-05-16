@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 from ai_module.inference.inference_config import InferenceConfig
@@ -107,13 +108,27 @@ class Summarizer:
             )
 
         per_chunk = max(1, chunk_highlights)
-        merged_blocks: List[str] = []
-        for i, ch in enumerate(chunks, start=1):
+        highlight_max_tokens = min(220, self.config.max_new_tokens_summary)
+
+        def _highlight_one(item: tuple[int, Dict[str, Any]]) -> str:
+            i, ch = item
             h = self.llm.generate(
                 higen_highlight_prompt(document=ch["text"], num_highlights=per_chunk),
-                max_new_tokens=min(220, self.config.max_new_tokens_summary),
+                max_new_tokens=highlight_max_tokens,
             )
-            merged_blocks.append(f"[Chunk {i}]\n{h}")
+            return f"[Chunk {i}]\n{h}"
+
+        can_parallel = (
+            self.config.summary_highlight_concurrency > 1
+            and len(chunks) > 1
+            and (self.config.llm_backend == "vllm" or self.config.summary_highlight_parallel_force)
+        )
+        if can_parallel:
+            workers = min(self.config.summary_highlight_concurrency, len(chunks))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                merged_blocks = list(ex.map(_highlight_one, enumerate(chunks, start=1)))
+        else:
+            merged_blocks = [_highlight_one((i, ch)) for i, ch in enumerate(chunks, start=1)]
 
         merged_highlights = "\n\n".join(merged_blocks).strip()
         summary = self.llm.generate(
