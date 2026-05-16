@@ -455,7 +455,7 @@ def get_next_job(
     if not job:
         return {"message": "No jobs"}
 
-    job.status = "processing"
+    job.status = "running"
     job.last_started_at = datetime.utcnow()
 
     document = (
@@ -536,7 +536,7 @@ def recover_stuck_jobs(
     stuck_jobs = (
         db.query(DocumentJob)
         .filter(
-            DocumentJob.status == "processing",
+            DocumentJob.status == "running",
             DocumentJob.last_started_at < datetime.utcnow() - timedelta(minutes=timeout_minutes),
             DocumentJob.retry_count < 3,
         )

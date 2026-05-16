@@ -29,6 +29,14 @@ LOCKED_LLM_BACKEND = "vllm"
 LOCKED_VLLM_BASE_URL = "http://n2.ckey.vn:2679"
 LOCKED_VLLM_MODEL_NAME = "qwen2.5:7b-instruct-fp16"
 LOCKED_VLLM_TIMEOUT_SECONDS = "180"
+LOCKED_OCR_BACKEND = "remote"
+LOCKED_OCR_BASE_URL = "http://n2.ckey.vn:2679"
+LOCKED_OCR_REMOTE_ENDPOINT = "/v1/chat/completions"
+LOCKED_OCR_REMOTE_MODEL_NAME = "qwen2.5:7b-instruct-fp16"
+LOCKED_OCR_TIMEOUT_SECONDS = "120"
+LOCKED_OCR_ENGINE = "auto"
+LOCKED_OCR_DPI = "96"
+LOCKED_OCR_REMOTE_CONCURRENCY = "2"
 
 
 def _strip_nul(text: str | None) -> str:
@@ -64,6 +72,15 @@ def _force_locked_gpu_env() -> None:
     os.environ["VLLM_BASE_URL"] = LOCKED_VLLM_BASE_URL
     os.environ["VLLM_MODEL_NAME"] = LOCKED_VLLM_MODEL_NAME
     os.environ["VLLM_TIMEOUT_SECONDS"] = LOCKED_VLLM_TIMEOUT_SECONDS
+    # Respect runtime/.env overrides first, fallback to locked defaults only when missing.
+    os.environ.setdefault("OCR_BACKEND", LOCKED_OCR_BACKEND)
+    os.environ.setdefault("OCR_BASE_URL", LOCKED_OCR_BASE_URL)
+    os.environ.setdefault("OCR_REMOTE_ENDPOINT", LOCKED_OCR_REMOTE_ENDPOINT)
+    os.environ.setdefault("OCR_REMOTE_MODEL_NAME", LOCKED_OCR_REMOTE_MODEL_NAME)
+    os.environ.setdefault("OCR_TIMEOUT_SECONDS", LOCKED_OCR_TIMEOUT_SECONDS)
+    os.environ.setdefault("OCR_ENGINE", LOCKED_OCR_ENGINE)
+    os.environ.setdefault("OCR_DPI", LOCKED_OCR_DPI)
+    os.environ.setdefault("OCR_REMOTE_CONCURRENCY", LOCKED_OCR_REMOTE_CONCURRENCY)
 
 
 def _extract_topics_methods(payload: dict) -> tuple[list[str], list[str]]:

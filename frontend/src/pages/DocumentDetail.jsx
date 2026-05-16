@@ -36,6 +36,7 @@ const statusLabel = {
 
 const DEFAULT_LAYOUT = { left: 26, center: 44, right: 30 };
 const LAYOUT_STORAGE_KEY = "document_detail_layout_v1";
+const FILE_EXT_RE = /\.(pdf|doc|docx|txt|rtf|md)$/i;
 
 function NotebookLogo() {
   return (
@@ -82,6 +83,16 @@ function mapQaRow(item) {
     pending: false,
     status: "done",
   };
+}
+
+function shouldRenameWorkspaceFromFirstDocument(currentTitle, firstDocumentTitle) {
+  const current = String(currentTitle || "").trim();
+  const first = String(firstDocumentTitle || "").trim();
+  if (!first) return false;
+  if (!current) return true;
+  if (current.toLowerCase() === "untitled notebook") return true;
+  if (FILE_EXT_RE.test(current)) return true;
+  return false;
 }
 
 export default function DocumentDetailPage() {
@@ -346,11 +357,24 @@ export default function DocumentDetailPage() {
         return;
       }
 
-      const nextWorkspace = workspaceResponse[0].value;
+      let nextWorkspace = workspaceResponse[0].value;
       const workspaceDocuments = mapApiDocuments(nextWorkspace.documents || [], []);
       const currentDocument =
         workspaceDocuments.find((item) => String(item.id) === String(document?.id)) ||
         workspaceDocuments[0];
+
+      const firstDocumentTitle = workspaceDocuments[0]?.title;
+      if (
+        workspaceId &&
+        shouldRenameWorkspaceFromFirstDocument(nextWorkspace?.title, firstDocumentTitle)
+      ) {
+        try {
+          await api.updateWorkspace(workspaceId, { title: firstDocumentTitle });
+          nextWorkspace = { ...nextWorkspace, title: firstDocumentTitle };
+        } catch {
+          // Keep current workspace title if rename fails.
+        }
+      }
 
       setWorkspace(nextWorkspace);
       setSources(workspaceDocuments);
@@ -460,17 +484,6 @@ export default function DocumentDetailPage() {
         pollIngestionStatus(response.document_id, displayName);
       }
       if (response.document_id) {
-        if (workspaceId && String(workspace?.title || "").trim().toLowerCase() === "untitled notebook") {
-          try {
-            const uploadedDoc = await api.getDocument(response.document_id);
-            const uploadedTitle = String(uploadedDoc?.metadata?.title || uploadedDoc?.filename || "").trim();
-            if (uploadedTitle) {
-              await api.updateWorkspace(workspaceId, { title: uploadedTitle });
-            }
-          } catch {
-            // Keep default workspace title if update fails.
-          }
-        }
         if (workspaceId) {
           await loadWorkspace();
         } else {

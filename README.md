@@ -65,7 +65,7 @@ npm run dev
 
 ## API quan trọng
 
-- Docs: `https://triumphant-charisma-production-f2a9.up.railway.app/docs`
+- Docs: `http://localhost:8000/docs`
 - Recommendation: `GET /api/v1/cms/documents/{document_id}/recommendations`
 
 ## Lưu ý

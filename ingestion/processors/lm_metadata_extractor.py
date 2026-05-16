@@ -1,8 +1,7 @@
 """
 lm_metadata_extractor.py
 ------------------------
-Extract metadata via remote/local LLM endpoint inside the ingestion pipeline.
-Supports both Ollama-native and OpenAI-compatible endpoints.
+Extract metadata using local LLM (Ollama) natively inside the ingestion pipeline.
 """
 
 import json
@@ -20,17 +19,13 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "").rstrip("/")
-OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
-OLLAMA_CHAT_ENDPOINT = os.getenv("OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://n2.ckey.vn:2679").rstrip("/")
+OLLAMA_CHAT_ENDPOINT = os.getenv("OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions").strip()
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}{OLLAMA_CHAT_ENDPOINT}"
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-fp16")
 TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
 TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))  # seconds
 MAX_INPUT_CHARS = 3000
-LOCKED_GPU_BASE_URL = os.getenv("INGESTION_LOCKED_OLLAMA_BASE_URL", "http://n2.ckey.vn:2679").rstrip("/")
-LOCKED_CHAT_ENDPOINT = os.getenv("INGESTION_LOCKED_OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions")
-LOCKED_MODEL = os.getenv("INGESTION_LOCKED_OLLAMA_MODEL", "qwen2.5:7b-instruct-fp16").strip()
 
 METADATA_PROMPT_TEMPLATE = """Bạn là trợ lý trích xuất metadata từ bài báo khoa học.
 Trích xuất JSON với các trường sau từ đoạn text bài báo:
@@ -61,140 +56,61 @@ TEXT:
 # Core Logic
 # ---------------------------------------------------------------------------
 
-def _extract_model_ids(payload: dict) -> list[str]:
-    data = payload.get("data")
-    if isinstance(data, list):
-        return [str(item.get("id", "")) for item in data if isinstance(item, dict)]
-    models = payload.get("models")
-    if isinstance(models, list):
-        return [str(item.get("name", "")) for item in models if isinstance(item, dict)]
-    return []
-
-
-def _is_locked_gpu_endpoint() -> bool:
-    """
-    Lock ingestion to one approved GPU endpoint to avoid using any other source.
-    """
-    if not OLLAMA_BASE_URL:
-        logger.warning("OLLAMA_BASE_URL is empty. Skipping LM metadata extraction.")
-        return False
-    if OLLAMA_BASE_URL != LOCKED_GPU_BASE_URL:
-        logger.warning(
-            "Blocked LM metadata extraction: OLLAMA_BASE_URL=%s is not allowed. Required=%s",
-            OLLAMA_BASE_URL,
-            LOCKED_GPU_BASE_URL,
-        )
-        return False
-    if OLLAMA_CHAT_ENDPOINT != LOCKED_CHAT_ENDPOINT:
-        logger.warning(
-            "Blocked LM metadata extraction: OLLAMA_CHAT_ENDPOINT=%s is not allowed. Required=%s",
-            OLLAMA_CHAT_ENDPOINT,
-            LOCKED_CHAT_ENDPOINT,
-        )
-        return False
-    return True
-
-
-def _is_locked_model(model: str) -> bool:
-    current = (model or "").strip()
-    if not current:
-        logger.warning("OLLAMA_MODEL is empty. Skipping LM metadata extraction.")
-        return False
-    if current != LOCKED_MODEL:
-        logger.warning(
-            "Blocked LM metadata extraction: OLLAMA_MODEL=%s is not allowed. Required=%s",
-            current,
-            LOCKED_MODEL,
-        )
-        return False
-    return True
-
-
 def is_ollama_available(model: str = DEFAULT_MODEL) -> bool:
-    """Kiểm tra endpoint LLM và model có sẵn không."""
-    if not _is_locked_gpu_endpoint():
-        return False
-    if not _is_locked_model(model):
-        return False
+    """Kiểm tra xem Ollama có đang chạy và model có sẵn không."""
     try:
         import requests
-
-        # OpenAI-compatible first
-        response = requests.get(f"{OLLAMA_BASE_URL}/v1/models", timeout=5)
-        if response.status_code == 200:
-            model_ids = _extract_model_ids(response.json())
-            return any(model in m or m.startswith(model.split(":")[0]) for m in model_ids)
-
-        # Ollama native fallback
-        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
-        if response.status_code == 200:
-            model_ids = _extract_model_ids(response.json())
-            return any(model in m or m.startswith(model.split(":")[0]) for m in model_ids)
-        return False
+        # OpenAI-compatible backends typically expose /v1/models
+        if "/v1/" in OLLAMA_CHAT_ENDPOINT:
+            response = requests.get(f"{OLLAMA_BASE_URL}/v1/models", timeout=5)
+        else:
+            response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        if response.status_code != 200:
+            return False
+        data = response.json()
+        if "/v1/" in OLLAMA_CHAT_ENDPOINT:
+            models = [m.get("id", "") for m in data.get("data", [])]
+        else:
+            models = [m.get("name", "") for m in data.get("models", [])]
+        base = model.split(":")[0]
+        return any(model in m or m.startswith(base) for m in models)
     except Exception:
         return False
 
-def _generate_ollama_native(prompt: str, model: str) -> str:
-    """Gọi Ollama native /api/generate."""
+def _generate(prompt: str, model: str = DEFAULT_MODEL) -> str:
+    """Gọi API generate/chat của Ollama hoặc OpenAI-compatible endpoint."""
     try:
         import requests
     except ImportError:
         raise ImportError("requests not installed. Run: pip install requests")
-
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
+    
+    is_chat = "/v1/" in OLLAMA_CHAT_ENDPOINT
+    if is_chat:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
             "temperature": TEMPERATURE,
-        },
-    }
-    try:
-        response = requests.post(OLLAMA_GENERATE_URL, json=payload, timeout=TIMEOUT)
-        response.raise_for_status()
-        return response.json().get("response", "").strip()
-    except Exception as e:
-        logger.debug(f"Ollama native generate failed: {e}")
-        return ""
-
-
-def _generate_openai_compatible(prompt: str, model: str) -> str:
-    """Gọi OpenAI-compatible /v1/chat/completions."""
-    try:
-        import requests
-    except ImportError:
-        raise ImportError("requests not installed. Run: pip install requests")
-
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": TEMPERATURE,
-    }
+        }
+    else:
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": TEMPERATURE,
+            },
+        }
     try:
         response = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=TIMEOUT)
         response.raise_for_status()
         data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        message = (choices[0] or {}).get("message") or {}
-        return str(message.get("content") or "").strip()
+        if is_chat:
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return str(content or "").strip()
+        return str(data.get("response", "")).strip()
     except Exception as e:
-        logger.debug(f"OpenAI-compatible chat failed: {e}")
+        logger.debug(f"Ollama generate failed: {e}")
         return ""
-
-
-def _generate(prompt: str, model: str = DEFAULT_MODEL) -> str:
-    """
-    Preferred path: OpenAI-compatible chat endpoint (works with your GPU server).
-    Fallback path: Ollama native generate endpoint.
-    """
-    if not _is_locked_gpu_endpoint():
-        return ""
-    text = _generate_openai_compatible(prompt, model=model)
-    if text:
-        return text
-    return _generate_ollama_native(prompt, model=model)
 
 def _parse_json_response(text: str) -> Optional[dict]:
     """Parse JSON trả về từ Ollama."""
@@ -227,6 +143,12 @@ def extract_metadata_via_lm(doc: UnifiedDocument, model: str = DEFAULT_MODEL) ->
     if not is_ollama_available(model):
         logger.warning(f"Ollama or model '{model}' not available. Skipping LM metadata extraction.")
         return doc
+    logger.info(
+        "LM metadata extraction via model='%s' endpoint='%s' timeout=%ss",
+        model,
+        OLLAMA_CHAT_URL,
+        TIMEOUT,
+    )
 
     text = doc.full_text or ""
     if not text or len(text.strip()) < 100:

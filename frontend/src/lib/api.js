@@ -1,5 +1,5 @@
 function normalizeApiBase(raw) {
-  const fallback = "https://triumphant-charisma-production-f2a9.up.railway.app/api/v1";
+  const fallback = "http://localhost:8000/api/v1";
   if (!raw || typeof raw !== "string") return fallback;
 
   let base = raw.trim().replace(/\/+$/, "");

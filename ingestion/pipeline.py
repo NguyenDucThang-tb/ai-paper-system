@@ -570,6 +570,10 @@ if __name__ == "__main__":
     parser.add_argument("--mailto",         default="pipeline@academic-rag.local", metavar="EMAIL")
     parser.add_argument("--aggressive",     action="store_true", help="Aggressive text cleaning")
     parser.add_argument("--dry-run-enrich", action="store_true", help="Skip Crossref API")
+    parser.add_argument("--use-lm",         dest="use_lm", action="store_true", default=True,
+                        help="Enable LM metadata extraction step (default: enabled)")
+    parser.add_argument("--no-lm",          dest="use_lm", action="store_false",
+                        help="Disable LM metadata extraction step")
     parser.add_argument("--output",         default="data/multimodal/figures", metavar="DIR")
     parser.add_argument("--ext",            default=".pdf,.docx,.html", metavar="EXTS",
                         help="Extensions cho batch mode, comma-separated")
@@ -600,6 +604,7 @@ if __name__ == "__main__":
             aggressive_clean       = args.aggressive,
             multimodal_output_root = args.output,
             dry_run_enrich         = args.dry_run_enrich,
+            use_lm                 = args.use_lm,
         )
 
         summary = summarize_batch(results)
@@ -631,6 +636,7 @@ if __name__ == "__main__":
         aggressive_clean       = args.aggressive,
         multimodal_output_root = args.output,
         dry_run_enrich         = args.dry_run_enrich,
+        use_lm                 = args.use_lm,
     )
 
     print(f"\n{'='*60}")
