@@ -34,12 +34,15 @@ class InferenceConfig:
     chunk_size_chars: int = int(os.getenv("CHUNK_SIZE_CHARS", "3500"))
     chunk_overlap_chars: int = int(os.getenv("CHUNK_OVERLAP_CHARS", "400"))
     max_input_chars_higen: int = int(os.getenv("MAX_INPUT_CHARS_HIGEN", "2600"))
+    summary_highlight_concurrency: int = int(os.getenv("SUMMARY_HIGHLIGHT_CONCURRENCY", "1"))
+    summary_highlight_parallel_force: bool = os.getenv("SUMMARY_HIGHLIGHT_PARALLEL_FORCE", "false").lower() == "true"
 
     top_k: int = int(os.getenv("TOP_K", "5"))
     max_new_tokens_summary: int = int(os.getenv("MAX_NEW_TOKENS_SUMMARY", "2000"))
     max_new_tokens_qa: int = int(os.getenv("MAX_NEW_TOKENS_QA", "500"))
     max_new_tokens_events: int = int(os.getenv("MAX_NEW_TOKENS_EVENTS", "700"))
-
+    
+    
     temperature: float = float(os.getenv("TEMPERATURE", "0.0"))
     repetition_penalty: float = float(os.getenv("REPETITION_PENALTY", "1.05"))
 
@@ -65,6 +68,8 @@ class InferenceConfig:
             raise ValueError("chunk_overlap_chars must be >=0 and < chunk_size_chars")
         if self.top_k <= 0:
             raise ValueError("top_k must be > 0")
+        if self.summary_highlight_concurrency <= 0:
+            raise ValueError("summary_highlight_concurrency must be > 0")
         if self.speculative_method not in {"none", "dflash"}:
             raise ValueError("speculative_method must be one of: none, dflash")
         if self.dflash_num_speculative_tokens <= 0:
