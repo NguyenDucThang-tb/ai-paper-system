@@ -20,17 +20,17 @@ from app.models.document_graph import DocumentGraph
 
 logger = logging.getLogger(__name__)
 
-LOCKED_OLLAMA_BASE_URL = "http://n2.ckey.vn:2679"
+LOCKED_OLLAMA_BASE_URL = "http://n2.ckey.vn:2757"
 LOCKED_OLLAMA_CHAT_ENDPOINT = "/v1/chat/completions"
 LOCKED_OLLAMA_MODEL = "qwen2.5:7b-instruct-fp16"
 LOCKED_OLLAMA_TIMEOUT = "120"
 LOCKED_OLLAMA_TEMPERATURE = "0.1"
 LOCKED_LLM_BACKEND = "vllm"
-LOCKED_VLLM_BASE_URL = "http://n2.ckey.vn:2679"
+LOCKED_VLLM_BASE_URL = "http://n2.ckey.vn:2757"
 LOCKED_VLLM_MODEL_NAME = "qwen2.5:7b-instruct-fp16"
 LOCKED_VLLM_TIMEOUT_SECONDS = "180"
 LOCKED_OCR_BACKEND = "remote"
-LOCKED_OCR_BASE_URL = "http://n2.ckey.vn:2679"
+LOCKED_OCR_BASE_URL = "http://n2.ckey.vn:2757"
 LOCKED_OCR_REMOTE_ENDPOINT = "/v1/chat/completions"
 LOCKED_OCR_REMOTE_MODEL_NAME = "qwen2.5:7b-instruct-fp16"
 LOCKED_OCR_TIMEOUT_SECONDS = "120"
