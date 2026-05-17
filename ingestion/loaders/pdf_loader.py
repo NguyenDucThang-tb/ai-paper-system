@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 OCR_DPI         = int(os.getenv("OCR_DPI", "96"))  # render resolution — lower = faster
 OCR_ENGINE      = os.getenv("OCR_ENGINE", "auto").strip().lower()  # 'paddle' | 'tesseract' | 'auto'
 OCR_BACKEND     = os.getenv("OCR_BACKEND", "remote").strip().lower()  # 'local' | 'remote'
-OCR_BASE_URL    = os.getenv("OCR_BASE_URL", "http://n3.ckey.vn:2757").strip().rstrip("/")
+OCR_BASE_URL    = os.getenv("OCR_BASE_URL", "http://n3.ckey.vn:2078").strip().rstrip("/")
 OCR_REMOTE_ENDPOINT = os.getenv("OCR_REMOTE_ENDPOINT", "/v1/chat/completions").strip()
 OCR_REMOTE_MODEL_NAME = os.getenv("OCR_REMOTE_MODEL_NAME", "qwen2.5:7b-instruct-q8_0").strip()
 OCR_TIMEOUT_SECONDS = int(os.getenv("OCR_TIMEOUT_SECONDS", "120"))
