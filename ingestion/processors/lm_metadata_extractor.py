@@ -19,10 +19,10 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://n2.ckey.vn:2757").rstrip("/")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://n3.ckey.vn:2757").rstrip("/")
 OLLAMA_CHAT_ENDPOINT = os.getenv("OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions").strip()
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}{OLLAMA_CHAT_ENDPOINT}"
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-fp16")
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q8_0")
 TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
 TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))  # seconds
 MAX_INPUT_CHARS = 3000
