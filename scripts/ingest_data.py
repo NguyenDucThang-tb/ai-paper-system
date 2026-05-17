@@ -50,14 +50,14 @@ from ingestion.pipeline import run_pipeline, run_pipeline_batch, summarize_batch
 from ingestion.schema.document_schema import UnifiedDocument
 
 logger = logging.getLogger(__name__)
-LOCKED_OLLAMA_BASE_URL = "http://n2.ckey.vn:2757"
+LOCKED_OLLAMA_BASE_URL = "http://n3.ckey.vn:2757"
 LOCKED_OLLAMA_CHAT_ENDPOINT = "/v1/chat/completions"
-LOCKED_OLLAMA_MODEL = "qwen2.5:7b-instruct-fp16"
+LOCKED_OLLAMA_MODEL = "qwen2.5:7b-instruct-q8_0"
 LOCKED_OLLAMA_TIMEOUT = "120"
 LOCKED_OLLAMA_TEMPERATURE = "0.1"
 LOCKED_LLM_BACKEND = "vllm"
-LOCKED_VLLM_BASE_URL = "http://n2.ckey.vn:2757"
-LOCKED_VLLM_MODEL_NAME = "qwen2.5:7b-instruct-fp16"
+LOCKED_VLLM_BASE_URL = "http://n3.ckey.vn:2757"
+LOCKED_VLLM_MODEL_NAME = "qwen2.5:7b-instruct-q8_0"
 LOCKED_VLLM_TIMEOUT_SECONDS = "180"
 
 
