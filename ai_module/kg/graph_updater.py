@@ -1,39 +1,3 @@
-"""
-ai_module/kg/graph_updater.py
-
-Cập nhật Knowledge Graph sau khi graph_builder.py đã build xong.
-
-    1. EntityMerger      — gộp Concept/Evidence node trùng nhau (alias dedup)
-    2. ProvenanceUpdater — cập nhật source_paper, source_section, confidence trên edges
-    3. ConsistencyChecker— phát hiện conflict, duplicate edge, orphan node
-
-Thứ tự khuyến nghị:
-    updater = GraphUpdater(neo4j_client)
-    report  = updater.run_all(paper_id, entities)
-
-Node label và edge type (khớp graph_builder.py v3 + relation_extractor.py v3):
-    Node: Paper, Author, Institution, Venue, Topic, Concept, Evidence, Metric, Finding, Chunk
-    Edge: WROTE, PUBLISHED_AT, HAS_TOPIC, CITES,
-          USES_CONCEPT, EVALUATES_ON, ACHIEVES_METRIC,
-          BASED_ON, EXTENDS, SUPPORTS, CONTRADICTS, HAS_CHUNK
-
-Changelog:
-    v3 — 2025-05 (sync entities.py v2)
-        [v3-1]  Bỏ import MethodEntity/DatasetEntity/TaskEntity → ConceptEntity/EvidenceEntity
-        [v3-2]  Neo4jClientProtocol: lookup_method/dataset → lookup_concept/evidence
-        [v3-3]  EntityMerger: entities.methods/datasets/tasks → concepts/evidences
-        [v3-4]  EntityMerger: label "Method"/"Dataset"/"Task" → "Concept"/"Evidence"
-        [v3-5]  EntityMerger: _MERGE_METHOD/DATASET_CYPHER → _MERGE_CONCEPT/EVIDENCE_CYPHER
-        [v3-6]  ProvenanceUpdater: Cypher USES_METHOD → USES_CONCEPT, (m:Method) → (c:Concept)
-                EVALUATES_ON (d:Dataset) → (e:Evidence), xóa ADDRESSES_TASK (Task là Concept)
-        [v3-7]  ProvenanceUpdater: dataset.metric → bỏ (EvidenceEntity không có metric field)
-        [v3-8]  ConsistencyChecker: label/edge type update toàn bộ
-        [v3-9]  Thêm check ORPHAN_EVIDENCE, bỏ ORPHAN_DATASET
-
-    v2 — 2025-05
-        [fix-1..4] — xem changelog gốc
-"""
-
 from __future__ import annotations
 
 import logging
