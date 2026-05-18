@@ -1,28 +1,3 @@
-"""
-ai_module/kg/entities.py
-
-Universal entity schema — dùng chung cho mọi lĩnh vực.
-Không tách domain-specific, chỉ dùng field `category` để phân biệt.
-
-Changelog:
-  - Thêm PaperEntity         — node trung tâm trong KG
-  - Thêm MetricEntity.measured_on / measured_by — context đo lường
-  - Thêm FindingEntity.supports / contradicts    — citation network
-  - ConceptEntity: tách based_on → based_on + extends, clarify convention
-  - section_type: thêm SECTION_TYPES constant
-  - [v2] Thêm "equipment", "tool", "method_component", "compound" vào CONCEPT_CATEGORIES
-         Thêm "report", "software" vào EVIDENCE_TYPES
-  - [v3] Thêm "regulation", "project", "contract", "financial_instrument",
-         "technology", "process", "material", "system" vào CONCEPT_CATEGORIES
-         Thêm "book", "standard", "event" vào EVIDENCE_TYPES
-         — dựa trên log thực tế 22 papers đa lĩnh vực (pháp luật, kỹ thuật, vật liệu, văn học)
-  - [v4] Mở rộng CONCEPT_CATEGORIES: thêm "organism", "location", "test", "education",
-         "metric", "activity", "document", "group", "program", "plan"
-         Mở rộng EVIDENCE_TYPES: thêm "journal", "statistic", "secondary_data", "interview"
-         EvidenceEntity.__post_init__: thêm fallback → "dataset" khi evidence_type không hợp lệ
-         — dựa trên log thực tế 50 papers, giảm UserWarning noise
-"""
-
 from __future__ import annotations
 
 import re
