@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://n3.ckey.vn:2078").rstrip("/")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://n2.ckey.vn:3009").rstrip("/")
 OLLAMA_CHAT_ENDPOINT = os.getenv("OLLAMA_CHAT_ENDPOINT", "/v1/chat/completions").strip()
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}{OLLAMA_CHAT_ENDPOINT}"
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q8_0")
